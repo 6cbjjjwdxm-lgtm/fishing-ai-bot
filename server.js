@@ -1,33 +1,20 @@
 require('dotenv').config();
+console.log('dotenv загружен');
+
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 
-const token = process.env.TELEGRAM_TOKEN || 'NO_TOKEN';
+const token = process.env.TELEGRAM_TOKEN;
+console.log('Токен:', token ? 'OK' : 'ПУСТОЙ!');
+
+if (!token) {
+  console.log('ОШИБКА: TELEGRAM_TOKEN отсутствует');
+  process.exit(1);
+}
+
 const bot = new TelegramBot(token, {webHook: true});
 
 const app = express();
 app.use(express.json());
 
-app.post('/webhook', (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
-});
-
-app.get('/', (req, res) => {
-  res.send('✅ Fishing Bot готов!');
-});
-
-bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id, '🎣 Спиннинг бот готов! Пиши вопросы.');
-});
-
-bot.on('message', async (msg) => {
-  if (msg.text && !msg.text.startsWith('/')) {
-    bot.sendMessage(msg.chat.id, '🤖 Отвечаю через OpenAI...');
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server: port ${PORT}`);
-});
+app.post('/webhook', (req
