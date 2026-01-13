@@ -4,6 +4,7 @@ import sys
 import datetime
 import requests
 import os
+from aiohttp import web # Добавили для веб-сервера
 
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
@@ -17,8 +18,23 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
+# --- НАЧАЛО: Веб-сервер для Render ---
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Render передает порт через переменную окружения PORT, по дефолту 10000
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+# --- КОНЕЦ: Веб-сервер для Render ---
+
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    sys.exit("Ошибка: не найдены TELEGRAM_TOKEN или OPENAI_API_KEY в .env")
+    sys.exit("Ошибка: не найдены TELEGRAM_TOKEN или OPENAI_API_KEY")
 
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -114,7 +130,6 @@ async def start(message: Message) -> None:
 async def handler(message: Message) -> None:
     text = message.text or ""
     if not text.startswith("*"):
-        # обычный чат, бота не трогаем
         return
 
     user_id = message.from_user.id
@@ -140,7 +155,9 @@ async def handler(message: Message) -> None:
 
 async def main() -> None:
     bot = Bot(token=TELEGRAM_TOKEN)
-    print("Бот запущен")
+    print("Бот запускается...")
+    # Запускаем веб-сервер и поллинг параллельно
+    await start_web_server() 
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
