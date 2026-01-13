@@ -18,6 +18,13 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
+    sys.exit("Ошибка: не найдены TELEGRAM_TOKEN или OPENAI_API_KEY")
+
+dp = Dispatcher()
+client = OpenAI(api_key=OPENAI_API_KEY)
+user_histories = {}
+
 # --- Веб-сервер для Render ---
 async def handle(request):
     return web.Response(text="Bot is running!")
@@ -30,19 +37,16 @@ async def start_web_server():
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
+    print(f"Web server started on port {port}")
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    sys.exit("Ошибка: не найдены TELEGRAM_TOKEN или OPENAI_API_KEY")
-
-dp = Dispatcher()
-client = OpenAI(api_key=OPENAI_API_KEY)
-user_histories = {}
-
+# --- Логика бота ---
 SYSTEM_PROMPT = """
 Ты — элитный эксперт по спиннинговой рыбалке и администратор рыболовного чата.
 Отвечаешь кратко, по делу, только когда пользователь обращается к тебе (сообщение начинается со *). 
 Используешь данные погоды (температура, давление, ветер, фаза луны) для прогноза клева.
 """
+
+# ... (функции get_moon_phase, get_weather_data, get_chat_response остаются без изменений) ...
 
 def get_moon_phase():
     lunar_cycle = 29.53058867
@@ -117,11 +121,8 @@ def get_chat_response(user_id: int, user_text: str, weather_info: str = "") -> s
 @dp.message(CommandStart())
 async def start(message: Message) -> None:
     await message.answer(
-        "Привет! Я ИИ по спиннингу.\n"
-        "Чтобы обратиться ко мне, начни сообщение со `*`.\n"
-        "Например:\n"
-        "*Прогноз Дубна\n"
-        "*Подбери спиннинг до 7000р"
+        "Привет! Я ИИ по спиннинговой рыбалке.\n"
+        "Спроси меня про снасти, тактику или клев (начни с *)."
     )
 
 @dp.message()
@@ -153,16 +154,19 @@ async def handler(message: Message) -> None:
 
 async def main() -> None:
     bot = Bot(token=TELEGRAM_TOKEN)
-    print("Бот запускается...")
     
-    # УДАЛЯЕМ WEBHOOK
+    # 1. Сначала удаляем вебхук и ждем завершения
+    print("Удаляю старый вебхук...")
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Запускаем сервер и бота параллельно
-    await asyncio.gather(
-        start_web_server(),
-        dp.start_polling(bot)
-    )
+    print("Вебхук удален.")
+
+    # 2. Запускаем веб-сервер в фоне (не блокируя выполнение)
+    print("Запускаю веб-сервер...")
+    asyncio.create_task(start_web_server())
+
+    # 3. Запускаем поллинг
+    print("Запускаю поллинг...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
