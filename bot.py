@@ -27,7 +27,7 @@ user_histories = {}
 
 # --- Веб-сервер для Render ---
 async def handle(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="🎣 Fishing Bot is alive!")
 
 async def start_web_server():
     app = web.Application()
@@ -39,38 +39,54 @@ async def start_web_server():
     await site.start()
     print(f"Web server started on port {port}")
 
-# --- ОБНОВЛЕННЫЙ МОЩНЫЙ СИСТЕМНЫЙ ПРОМПТ ---
+# --- ЭКСПЕРТНЫЙ СИСТЕМНЫЙ ПРОМПТ ---
 SYSTEM_PROMPT = """
-Ты — профессиональный рыболовный гид, эксперт по водоемам России и фанат ловли в Подмосковье.
-Твоя страсть — спиннинг, но ты разбираешься и в фидере.
+Ты — профессиональный рыболовный гид и эксперт по водоемам Центральной России (особенно Подмосковье).
+Твоя страсть — спиннинг на малых реках, но ты разбираешься и в фидере, и в зимней рыбалке.
 
-Твои знания и принципы:
-1. **Прогноз клева:** Ты даешь его ТОЛЬКО на основе данных погоды (давление, ветер, фаза луны), которые тебе передаст система. Если данных нет — просишь уточнить город.
-2. **Лимит прогноза:** Ты умеешь анализировать погоду только на 3 дня вперед.
-3. **ЭКСПЕРТИЗА ПО ВОДОЕМАМ:**
-   - **Малые реки (МР):** Твоя коронная тема.
-     - *Пахра:* Сложная, прессинг, но есть крупный лещ и жерех. Зимой нижнее течение не замерзает.
-     - *Рожайка, Северка, Нерская:* Идеальны для ультралайта (голавль, окунь, щучка). Лучшее время — май (майский жук) и осень.
-     - *Десна, Моча:* Щука в жабовниках, окунь на микроджиг.
-     - *Пехорка:* Теплая, не замерзает, много разной рыбы (даже экзотика), но экология сомнительная.
-   - **Крупные реки:**
-     - *НМР (Нижняя Москва-река):* Чулково, Бронницы, Фаустово. Главный зимний полигон спиннингистов (не замерзает). Судак, щука, жерех.
-     - *Ока:* Серпухов, Кашира. Перекаты (голавль, жерех), ямы (судак, лещ).
-   - **Водохранилища:**
-     - *Можайка, Руза, Озерна:* Судак, щука (джиг), зимой — подлещик.
-     - *Истра:* Окунь, щука вдоль травы.
-4. **Сезонность:**
-   - *Зима:* НМР/Пехорка (спиннинг), Вдхр (лед).
-   - *Весна:* Малые реки (плотва перед нерестом, уклейка).
-   - *Лето:* Ока (утро/вечер), заросшие малые реки (воблеры, топвотеры).
-   - *Осень:* Жор щуки везде, джиг на ямах.
-5. **Форумы:** Используй обороты: "Мужики на Русфишинге пишут...", "По последним отчетам...", "Как говорят местные...".
-6. **Стиль:** Общайся как "свой". Используй сленг: "микруха" (микроджиг), "палка" (спиннинг), "мясорубка" (катушка), "слив" (сход рыбы), "борода". Будь позитивным и кратким.
+**ТВОИ ЗНАНИЯ И ПРИНЦИПЫ:**
 
-НЕ выдумывай погоду. Если данных нет — скажи прямо.
+1. **ПРОГНОЗ КЛЕВА:**
+   - Ты даешь прогноз ТОЛЬКО на основе данных погоды (давление, ветер, температура, луна), которые тебе передаст система в формате "АКТУАЛЬНАЯ ПОГОДА ДЛЯ АНАЛИЗА: ...".
+   - Если ты видишь такие данные — обязательно анализируй их (стабильность давления, направление ветра, фаза луны).
+   - Если данных нет — честно скажи: "Не вижу погоды. Уточни город и дату (сегодня/завтра/послезавтра)".
+
+2. **ЛИМИТ ПРОГНОЗА:** Точный прогноз возможен только на 3 дня (сегодня, завтра, послезавтра). Дальше погода непредсказуема.
+
+3. **ЭКСПЕРТИЗА ПО ВОДОЕМАМ (Подмосковье):**
+
+   **МАЛЫЕ РЕКИ (МР) — твоя коронная тема:**
+   - *Пахра:* Сложная река с прессингом. Крупный лещ, жерех, голавль. Зимой нижнее течение не замерзает (теплые сбросы). Лучшие точки: Красный Строитель, Подольск.
+   - *Рожайка, Северка, Нерская:* Идеальны для ультралайта (голавль 200-500г, окунь, щучка-травянка). Лучшее время — май (майский жук, вертушки №00-0) и осень (джиг 1-2").
+   - *Десна, Моча:* Классические "жабовники" — щука в траве, окунь на микроджиг (0.8-2г).
+   - *Пехорка:* Теплая, никогда не замерзает (химия). Много разной рыбы, но качество воды сомнительное. Популярна зимой у спиннингистов.
+   - *Истра, Яуза:* Живописные, малолюдные. Окунь, щука, голавль. Рыбалка сложная (завалы, узкие участки).
+   
+   **КРУПНЫЕ РЕКИ:**
+   - *НМР (Нижняя Москва-река):* Чулково, Бронницы, Фаустово. Главный зимний полигон (не замерзает). Судак на джиг 10-14см, щука, жерех.
+   - *Ока:* Серпухов, Кашира, Озёры. Перекаты — голавль и жерех (кастмастеры, воблеры). Ямы — судак (джиг 12-15см), крупный лещ (фидер).
+   
+   **ВОДОХРАНИЛИЩА:**
+   - *Можайское, Рузское, Озернинское:* Судак (джиг на бровках 5-12м), щука вдоль травы. Зимой — подлещик, окунь.
+   - *Истринское:* Окунь, щука. Популярное место для семейного отдыха.
+
+4. **СЕЗОННОСТЬ:**
+   - *Зима (дек-фев):* НМР/Пехорка (спиннинг в оттепель), водохранилища (лёд: жерлицы, балансир).
+   - *Весна (март-май):* Малые реки перед нерестом (плотва, уклейка). Май — жор голавля на "майского".
+   - *Лето (июнь-авг):* Ока (утро/вечер), заросшие малые реки (воблеры-минноу, топвотеры). Жара — клев слабый.
+   - *Осень (сен-ноя):* Жор щуки везде! Джиг на ямах, воблеры на мели.
+
+5. **ИСТОЧНИКИ ИНФОРМАЦИИ:**
+   Используй обороты: "Мужики на Русфишинге пишут...", "По последним отчетам с водоемов...", "Как говорят местные...".
+
+6. **СТИЛЬ ОБЩЕНИЯ:**
+   Общайся как "свой в доску". Используй сленг: "микруха" (микроджиг), "палка" (спиннинг), "мясорубка" (катушка), "слив" (сход рыбы), "борода" (запутанная леска), "борщ" (мутная вода). Будь позитивным, кратким и конкретным.
+
+**ВАЖНО:** НЕ выдумывай погоду. Если данных нет — скажи прямо. Не пиши длинных текстов — 3-5 предложений.
 """
 
 def get_moon_phase():
+    """Определяет фазу луны на сегодня"""
     lunar_cycle = 29.53058867
     date = datetime.date.today()
     known_new_moon = datetime.date(2000, 1, 6)
@@ -85,47 +101,54 @@ def get_moon_phase():
     if 22 <= pos < 23: return "Последняя четверть 🌗"
     return "Старая луна 🌘"
 
-def get_weather_forecast(city: str, day_offset: int = 0) -> str | None:
+def get_weather_forecast(city: str, day_offset: int) -> str | None:
     """
-    Получает прогноз погоды на конкретный день.
-    day_offset: 0 - сегодня, 1 - завтра, 2 - послезавтра.
+    Получает прогноз погоды через OpenWeatherMap API.
+    day_offset: 0 (сегодня), 1 (завтра), 2 (послезавтра).
+    Возвращает строку с данными или "LIMIT_EXCEEDED", если запрос > 2 дней.
     """
     if not OPENWEATHER_API_KEY:
         return None
     
+    # Ограничение 3 дня
+    if day_offset > 2:
+        return "LIMIT_EXCEEDED"
+
     try:
-        # Используем endpoint 'forecast' (прогноз на 5 дней)
         url = (
             "http://api.openweathermap.org/data/2.5/forecast"
             f"?q={city}&appid={OPENWEATHER_API_KEY}&units=metric&lang=ru"
         )
-        r = requests.get(url).json()
+        r = requests.get(url, timeout=5).json()
         
         if str(r.get("cod")) != "200":
             return None
 
-        # Определяем целевую дату
         target_date = datetime.date.today() + datetime.timedelta(days=day_offset)
         target_date_str = target_date.strftime("%Y-%m-%d")
 
-        # Ищем прогноз на 12:00 или 15:00 этого дня (середина рыбалки)
+        # Ищем прогноз на нужный день (приоритет: полдень -> день -> любое время)
         forecasts = r.get("list", [])
-        best_forecast = None
+        day_forecasts = [item for item in forecasts if target_date_str in item["dt_txt"]]
         
-        for item in forecasts:
-            # item["dt_txt"] имеет формат "2023-10-05 12:00:00"
-            if target_date_str in item["dt_txt"]:
-                # Берем первый попавшийся прогноз на этот день (обычно утро/день)
-                # Или стараемся найти день (12:00 / 15:00)
-                if "12:00" in item["dt_txt"] or "15:00" in item["dt_txt"]:
-                    best_forecast = item
+        if not day_forecasts:
+            # Если на сегодня уже нет (поздний вечер), берем ближайший
+            if day_offset == 0 and forecasts:
+                best_forecast = forecasts[0]
+            else:
+                return None
+        else:
+            # Ищем оптимальное время (полдень / день)
+            best_forecast = None
+            for time_str in ["12:00", "15:00", "09:00", "18:00"]:
+                found = next((f for f in day_forecasts if time_str in f["dt_txt"]), None)
+                if found:
+                    best_forecast = found
                     break
-                if best_forecast is None: # Если нет идеального времени, берем хоть какое-то
-                    best_forecast = item
+            if not best_forecast:
+                best_forecast = day_forecasts[0]
 
-        if not best_forecast:
-            return f"Нет данных прогноза для {city} на {target_date_str}."
-
+        # Парсинг данных
         temp = best_forecast["main"]["temp"]
         pressure_hpa = best_forecast["main"]["pressure"]
         pressure_mm = int(pressure_hpa * 0.75006)
@@ -136,12 +159,13 @@ def get_weather_forecast(city: str, day_offset: int = 0) -> str | None:
         desc = best_forecast["weather"][0]["description"]
         moon = get_moon_phase()
 
-        day_name = ["Сегодня", "Завтра", "Послезавтра"][day_offset] if day_offset < 3 else target_date_str
+        day_names = ["Сегодня", "Завтра", "Послезавтра"]
+        day_label = day_names[day_offset] if day_offset < 3 else target_date_str
 
         return (
-            f"ПРОГНОЗ ({city}, {day_name}): {desc.capitalize()}. "
-            f"Температура {temp}°C. Давление {pressure_mm} мм рт.ст. "
-            f"Ветер {wind_speed} м/с ({wind_dir}). Луна: {moon}."
+            f"📍 {city}, {day_label}: {desc.capitalize()}. "
+            f"🌡 t={temp}°C. 🔽 Давление {pressure_mm} мм рт.ст. "
+            f"💨 Ветер {wind_speed} м/с ({wind_dir}). {moon}"
         )
 
     except Exception as e:
@@ -149,100 +173,126 @@ def get_weather_forecast(city: str, day_offset: int = 0) -> str | None:
         return None
 
 def get_chat_response(user_id: int, user_text: str, weather_info: str = "") -> str:
+    """Генерирует ответ от OpenAI с учетом истории и погоды"""
+    
+    # Инициализация истории пользователя
     if user_id not in user_histories:
         user_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    content_to_send = user_text
+    # Обработка лимита дней
+    if weather_info == "LIMIT_EXCEEDED":
+        return "Извини, друг! Точный прогноз я могу дать только на 3 дня (сегодня/завтра/послезавтра). Дальше погода — лотерея. 🎲"
+    
+    # КЛЮЧЕВОЙ МОМЕНТ: Добавление погоды в контекст
     if weather_info:
+        # Добавляем погоду как системное сообщение (бот её "увидит")
         user_histories[user_id].append(
-            {"role": "system", "content": f"Данные погоды: {weather_info}"}
+            {"role": "system", "content": f"АКТУАЛЬНАЯ ПОГОДА ДЛЯ АНАЛИЗА: {weather_info}"}
         )
-        content_to_send = f"Дай прогноз клева, учитывая эти данные: {user_text}"
     
-    user_histories[user_id].append({"role": "user", "content": content_to_send})
+    # Добавляем вопрос пользователя
+    user_histories[user_id].append({"role": "user", "content": user_text})
     
-    if len(user_histories[user_id]) > 10:
-        user_histories[user_id] = [user_histories[user_id][0]] + user_histories[user_id][-8:]
+    # Ограничиваем историю (чтобы не тратить токены)
+    if len(user_histories[user_id]) > 16:
+        user_histories[user_id] = [user_histories[user_id][0]] + user_histories[user_id][-14:]
         
     try:
         resp = client.chat.completions.create(
             model="gpt-4o",
             messages=user_histories[user_id],
             temperature=0.7,
+            max_tokens=500  # Ограничение для краткости
         )
         answer = resp.choices[0].message.content
         user_histories[user_id].append({"role": "assistant", "content": answer})
         return answer
     except Exception as e:
-        return "⚠ Ошибка ИИ. Попробуйте позже."
+        logging.error(f"OpenAI Error: {e}")
+        return "⚠️ Облом с нейросетью. Попробуй через минутку."
 
 @dp.message(CommandStart())
 async def start(message: Message) -> None:
     await message.answer(
-        "🎣 Привет! Я ИИ-эксперт по рыбалке.\n"
-        "Напиши `*` перед сообщением, чтобы спросить меня.\n"
-        "Примеры:\n"
-        "`*Клев Дубна завтра`\n"
-        "`*Погода Москва послезавтра`"
+        "🎣 **Привет, рыбак!** Я твой AI-гид по водоемам.\n\n"
+        "💬 Пиши вопрос, начиная со звездочки `*`.\n\n"
+        "**Примеры:**\n"
+        "🔹 `*Клев Дубна завтра`\n"
+        "🔹 `*Куда поехать на выходные?`\n"
+        "🔹 `*На что ловить щуку сейчас?`\n\n"
+        "Погнали! 🚀"
     )
 
 @dp.message()
 async def handler(message: Message) -> None:
     text = message.text or ""
+    
+    # Реагируем только на сообщения со звездочкой
     if not text.startswith("*"):
         return
 
     user_id = message.from_user.id
     raw_text = text[1:].strip()
+    
     if not raw_text:
         return
 
     await message.bot.send_chat_action(message.chat.id, "typing")
 
-    weather_context = ""
-    words = raw_text.lower().split()
+    # --- ЛОГИКА ОПРЕДЕЛЕНИЯ ПАРАМЕТРОВ ---
+    words_lower = raw_text.lower().split()
     
-    # Простая логика определения даты
+    # 1. Определяем день (сегодня/завтра/послезавтра)
     day_offset = 0
-    if "завтра" in words:
+    if "завтра" in words_lower:
         day_offset = 1
-    elif "послезавтра" in words:
+    if "послезавтра" in words_lower or ("после" in words_lower and "завтра" in words_lower):
         day_offset = 2
     
-    # Поиск города (очень простой: ищем слово с большой буквы в оригинале или второе слово)
-    city_candidate = ""
-    original_words = raw_text.split()
-    if len(original_words) > 1:
-        # Пытаемся найти город (обычно второе слово или то, что не "клев"/"прогноз")
-        for w in original_words:
-            clean_w = "".join(filter(str.isalpha, w))
-            if len(clean_w) > 2 and clean_w.lower() not in ["клев", "прогноз", "погода", "завтра", "послезавтра", "сегодня"]:
-                city_candidate = clean_w
-                break
+    # Если просят "через неделю" или подобное — ставим заведомо > 2
+    if any(word in words_lower for word in ["неделю", "недели", "месяц", "выходные"]):
+        # "выходные" может быть и ближайшие (завтра), но для подстраховки проверим контекст
+        if day_offset == 0 and not ("этих" in words_lower or "эти" in words_lower):
+            day_offset = 3  # Триггер отказа
     
-    if city_candidate:
-        wd = get_weather_forecast(city_candidate, day_offset)
-        if wd:
-            weather_context = wd
-
-    # Убираем Markdown форматирование для надежности
+    # 2. Ищем город (только если запрос про погоду/клев)
+    weather_context = ""
+    triggers = ["прогноз", "клев", "погода", "клюет", "завтра", "сегодня", "послезавтра"]
+    
+    if any(t in words_lower for t in triggers):
+        # Ищем город в исходном тексте (слово с большой буквы или подходящее по длине)
+        original_words = raw_text.split()
+        stop_words = {"прогноз", "клев", "погода", "завтра", "послезавтра", "сегодня", 
+                     "клюет", "как", "на", "в", "для", "где", "куда", "ли"}
+        
+        for word in original_words:
+            clean = "".join(filter(str.isalpha, word))
+            if len(clean) > 2 and clean.lower() not in stop_words:
+                city_candidate = clean
+                # Пытаемся получить погоду
+                weather_data = get_weather_forecast(city_candidate, day_offset)
+                if weather_data:
+                    weather_context = weather_data
+                    break
+    
+    # 3. Отправляем в GPT
     answer = get_chat_response(user_id, raw_text, weather_context)
     await message.reply(answer)
 
 async def main() -> None:
     bot = Bot(token=TELEGRAM_TOKEN)
     
-    print("Удаляю старый вебхук...")
+    print("🔄 Удаляю старый вебхук...")
     await bot.delete_webhook(drop_pending_updates=True)
     
-    print("Запускаю веб-сервер...")
+    print("🌐 Запускаю веб-сервер...")
     asyncio.create_task(start_web_server())
 
-    print("Запускаю поллинг...")
+    print("📡 Запускаю поллинг...")
     try:
         await dp.start_polling(bot)
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"❌ Ошибка: {e}")
     finally:
         await bot.session.close()
 
