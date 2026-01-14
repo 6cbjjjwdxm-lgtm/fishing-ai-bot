@@ -155,20 +155,24 @@ async def handler(message: Message) -> None:
 async def main() -> None:
     bot = Bot(token=TELEGRAM_TOKEN)
     
-    # 1. Сначала удаляем вебхук и ждем завершения
+    # 1. Сброс вебхука
     print("Удаляю старый вебхук...")
     await bot.delete_webhook(drop_pending_updates=True)
-    print("Вебхук удален.")
-
-    # 2. Запускаем веб-сервер в фоне (не блокируя выполнение)
+    
+    # 2. Веб-сервер
     print("Запускаю веб-сервер...")
     asyncio.create_task(start_web_server())
 
-    # 3. Запускаем поллинг
+    # 3. Поллинг с правильным закрытием
     print("Запускаю поллинг...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     asyncio.run(main())
+
 
