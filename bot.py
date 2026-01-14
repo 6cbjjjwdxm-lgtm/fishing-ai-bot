@@ -150,7 +150,7 @@ async def handler(message: Message) -> None:
                     weather_context = wd
 
     answer = get_chat_response(user_id, raw_text, weather_context)
-    await message.reply(answer, parse_mode="Markdown")
+    await message.reply(answer)
 
 async def main() -> None:
     bot = Bot(token=TELEGRAM_TOKEN)
@@ -171,3 +171,4 @@ async def main() -> None:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     asyncio.run(main())
+
