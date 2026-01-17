@@ -1,6 +1,9 @@
-git add .
-git commit -m "Fix aiogram3 imports"
-git push
+aiogram==3.4.1
+aiohttp==3.9.3
+openai==1.12.0
+python-dotenv==1.0.0
+requests==2.31.0
+
 
 
 
