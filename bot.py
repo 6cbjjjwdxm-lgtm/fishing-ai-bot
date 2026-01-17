@@ -32,36 +32,40 @@ user_histories: Dict[int, List[Dict]] = {}
 # --- ВЕБ-СЕРВЕР ---
 async def start_web_server():
     app = web.Application()
-    app.router.add_get('/', lambda r: web.Response(text="🎣 Expert Fishing Bot (Russia + Better Geo) is Alive!"))
+    app.router.add_get('/', lambda r: web.Response(text="🎣 Expert Fishing Bot (Smart Intent) is Alive!"))
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-# --- 1. AI ГЕО-КОДЕР (УЛУЧШЕННЫЙ) ---
-async def extract_geo_variants(text: str) -> dict:
+# --- 1. AI АНАЛИЗАТОР (INTENT + GEO) ---
+async def analyze_user_query(text: str) -> dict:
     """
-    Возвращает расширенный список городов.
+    Определяет:
+    1. Тип вопроса (forecast - нужен прогноз клева, general - просто вопрос/фото).
+    2. Географию (если нужен прогноз).
     """
-    system_geo = """
-    Ты — Geo-аналитик и Эксперт по географии России.
-    Пользователь спрашивает про рыбалку на водоеме (река, озеро, вдхр).
+    system_prompt = """
+    Ты — Аналитик запросов для рыболовного бота.
+    Твоя задача — классифицировать запрос пользователя и извлечь данные.
 
-    ТВОЯ ЗАДАЧА:
-    1. Определить название водоема.
-    2. Подобрать 3-5 населенных пунктов, стоящих ПРЯМО НА ЭТОМ ВОДОЕМЕ или вплотную к нему.
-    3. Разнеси города географически (например: верховье, среднее течение, низовье).
+    ТИПЫ ЗАПРОСОВ (intent):
+    1. "forecast" — вопросы про КЛЕВ, РЫБАЛКУ в конкретном месте ("Как клев на Оке?", "Куда поехать завтра?").
+    2. "general" — вопросы про снасти, приманки, анализ фото, советы без привязки к месту ("Что это за воблер?", "Как вязать узел?", "Оцени улов").
+
+    ЕСЛИ intent="forecast":
+    - Найди название водоема (location_name).
+    - Подбери 3-5 крупных населенных пунктов (cities) ПРЯМО НА ВОДОЕМЕ для проверки погоды.
     
-    Примеры:
-    - Запрос "Пахра" -> ["Подольск", "Домодедово", "п. Володарского", "Ям"]
-    - Запрос "Волга" -> ["Тверь", "Ярославль", "Казань", "Астрахань"]
-    - Запрос "Рыбинка" -> ["Рыбинск", "Борок", "Весьегонск", "Пошехонье"]
+    ЕСЛИ intent="general":
+    - Поля location_name и cities оставь пустыми.
 
-    ВЕРНИ ТОЛЬКО JSON:
+    ВЕРНИ JSON:
     {
-      "location_name": "Название (например: Река Пахра)",
-      "cities": ["Город1", "Город2", "Город3", "Город4"],
+      "intent": "forecast" или "general",
+      "location_name": "Название места" (или null),
+      "cities": ["Город1", "Город2"] (или []),
       "day_offset": 0
     }
     """
@@ -69,16 +73,16 @@ async def extract_geo_variants(text: str) -> dict:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": system_geo},
-                {"role": "user", "content": f"Запрос рыбака: {text}"}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Запрос: {text}"}
             ],
-            temperature=0.3, # Чуть выше 0, чтобы давал разные города
+            temperature=0,
             response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
-        logging.error(f"Geo Error: {e}")
-        return {}
+        logging.error(f"Analyzer Error: {e}")
+        return {"intent": "general"} # Fallback
 
 # --- 2. ПОГОДА ---
 def get_moon_phase():
@@ -99,6 +103,11 @@ def get_weather_forecast(city: str, day_offset: int) -> str | None:
         
         forecasts = r.get("list", [])
         day_data = [f for f in forecasts if target_str in f["dt_txt"]]
+        
+        # Если прогноз на сегодня уже прошел (вечер), берем ближайший
+        if not day_data and day_offset == 0:
+             day_data = forecasts[:3]
+
         if not day_data: return None
         
         best = next((f for f in day_data if "12:00" in f["dt_txt"]), day_data[0])
@@ -109,40 +118,38 @@ def get_weather_forecast(city: str, day_offset: int) -> str | None:
 # --- 3. GPT РЫБОЛОВ ---
 SYSTEM_PROMPT = """
 Ты — ПРОФЕССИОНАЛЬНЫЙ РЫБОЛОВНЫЙ ГИД. 2026 год.
-Дай прогноз клева, учитывая место, погоду и сезон.
 
-🛑 ПРАВИЛА:
-1. ЦИФРЫ: Используй данные погоды (давление, ветер) для аргументации.
-2. СЕЗОН: Если мороз — ЗИМА (лед, жерлицы). Тепло — ЛЕТО.
-3. МЕСТО: Учитывай особенности конкретной точки (течение, глубины).
+ТВОЯ ЗАДАЧА:
+1. Если вопрос про КЛЕВ/ПРОГНОЗ: Используй переданные данные о погоде и месте. Дай детальный прогноз (активность рыбы, снасти).
+2. Если вопрос про ФОТО/СНАСТИ (без погоды): Просто проанализируй фото или ответь на вопрос экспертно. Не выдумывай погоду, если её нет.
 
-ФОРМАТ:
-📍 **[Место] | [Дата]**
+ФОРМАТ ОТВЕТА (Для прогноза):
+📍 **[Место]** (Погода: [Город])
+🌡 **ВЕРДИКТ:** ...
+🐟 **ПРОГНОЗ:** ...
 
-🌡 **ПОГОДНЫЙ ВЕРДИКТ:**
-(Коротко про комфорт и активность рыбы).
-
-🐟 **КТО КЛЮЕТ:**
-> **[Рыба]:** Активность ?/10. Где искать.
-> **[Рыба]:** Активность ?/10.
-
-⚙️ **СНАСТИ:**
-(Тонкости оснастки).
+ФОРМАТ ОТВЕТА (Для общих вопросов):
+📝 **ЭКСПЕРТНОЕ МНЕНИЕ:**
+(Твой ответ на вопрос или анализ приманки с фото).
 
 ---
-НХНЧ! 🎣
+Ни хвоста, ни чешуи! 🎣
 """
 
-async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str, image_url: str = None) -> str:
+async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str, intent: str, image_url: str = None) -> str:
     now = datetime.datetime.now()
     date_str = now.strftime("%d.%m.%Y")
     
     if user_id not in user_histories:
         user_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    user_prompt = f"Вопрос: {text}\n📍 Место: {loc_name}\n📅 СЕГОДНЯ: {date_str}\n"
-    if weather: user_prompt += f"\n📊 ПОГОДА:\n{weather}"
-    else: user_prompt += "\n(Погода не найдена, дай общие советы)."
+    # Формируем промпт в зависимости от интента
+    if intent == "forecast":
+        user_prompt = f"ЗАПРОС НА ПРОГНОЗ: {text}\n📍 Место: {loc_name}\n📅 Дата: {date_str}\n"
+        if weather: user_prompt += f"\n📊 ПОГОДА:\n{weather}"
+        else: user_prompt += "\n(Погода не найдена. Дай общие советы)."
+    else:
+        user_prompt = f"ВОПРОС ЭКСПЕРТУ: {text}\n(Это общий вопрос, погода не требуется)."
 
     content_payload = [{"type": "text", "text": user_prompt}]
     if image_url: content_payload.append({"type": "image_url", "image_url": {"url": image_url}})
@@ -155,13 +162,15 @@ async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str
         response = client.chat.completions.create(
             model="gpt-4o-mini", messages=user_histories[user_id], temperature=0.7, max_tokens=1000
         )
-        return response.choices[0].message.content
+        answer = response.choices[0].message.content
+        user_histories[user_id].append({"role": "assistant", "content": answer})
+        return answer
     except: return "⚠️ Ошибка AI."
 
 # --- ХЕНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("👋 Привет! Спроси про любой водоем: `*Клев на Пахре`")
+    await message.answer("👋 Привет! Я разбираюсь и в клеве, и в снастях.\n`*Клев на Волге`\n`*Что это за воблер?` (пришли фото)")
 
 @dp.callback_query(F.data.startswith("geo:"))
 async def cb_geo_select(callback: CallbackQuery):
@@ -174,8 +183,8 @@ async def cb_geo_select(callback: CallbackQuery):
         
         await callback.message.edit_text(f"✅ Выбрано: {city}. Готовлю прогноз...")
         
-        prompt = f"Клев на {loc} (погода по г. {city})"
-        response = await get_chat_response(callback.from_user.id, prompt, weather, loc)
+        # Для кнопок интент всегда forecast
+        response = await get_chat_response(callback.from_user.id, f"Клев на {loc}", weather, loc, "forecast")
         await callback.message.reply(response, parse_mode="Markdown")
     except:
         await callback.message.edit_text("⚠️ Ошибка.")
@@ -188,42 +197,52 @@ async def expert_fishing_handler(message: Message):
     query = full_text[1:].strip()
     await message.bot.send_chat_action(message.chat.id, "typing")
 
-    # 1. AI ищет города
-    geo = await extract_geo_variants(query)
-    cities = geo.get("cities", [])
-    loc_name = geo.get("location_name", "Водоем")
-    day_offset = geo.get("day_offset", 0)
-
-    # 2. Логика кнопок
-    if not cities:
-        weather = get_weather_forecast("Москва", day_offset)
-        msg = f"⚠️ Не нашел место. Прогноз по Москве:\n{weather}"
-        resp = await get_chat_response(message.from_user.id, query, msg, loc_name)
-        await message.reply(resp, parse_mode="Markdown")
-        return
-
-    if len(cities) > 1:
-        # Много городов -> Кнопки (до 6 штук, по 2 в ряд)
-        kb = InlineKeyboardBuilder()
-        for city in cities[:6]: 
-            safe_loc = loc_name[:15]
-            kb.button(text=city, callback_data=f"geo:{city}:{safe_loc}:{day_offset}")
-        kb.adjust(2)
-        await message.reply(f"📍 **{loc_name}**. Уточните место:", reply_markup=kb.as_markup())
-        return
-
-    # Один город
-    city = cities[0]
-    weather = get_weather_forecast(city, day_offset)
-    if not weather: weather = f"⚠️ Погода в {city} не найдена."
+    # 1. Анализируем запрос
+    analysis = await analyze_user_query(query)
+    intent = analysis.get("intent", "general")
     
-    img = None
+    # Сразу проверяем фото
+    image_url = None
     if message.photo:
         f = await message.bot.get_file(message.photo[-1].file_id)
-        img = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{f.file_path}"
+        image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{f.file_path}"
 
-    resp = await get_chat_response(message.from_user.id, query, weather, loc_name, img)
-    await message.reply(resp, parse_mode="Markdown")
+    # === ЛОГИКА ДЛЯ ПРОГНОЗА ===
+    if intent == "forecast":
+        cities = analysis.get("cities", [])
+        loc_name = analysis.get("location_name", "Водоем")
+        day_offset = analysis.get("day_offset", 0)
+        
+        if not cities:
+            # Fallback
+            weather = get_weather_forecast("Москва", day_offset)
+            msg = f"⚠️ Не нашел место. Прогноз по Москве:\n{weather}"
+            resp = await get_chat_response(message.from_user.id, query, msg, loc_name, "forecast", image_url)
+            await message.reply(resp, parse_mode="Markdown")
+            return
+
+        if len(cities) > 1:
+            kb = InlineKeyboardBuilder()
+            for city in cities[:6]: 
+                safe_loc = loc_name[:15]
+                kb.button(text=city, callback_data=f"geo:{city}:{safe_loc}:{day_offset}")
+            kb.adjust(2)
+            await message.reply(f"📍 **{loc_name}**. Уточните место:", reply_markup=kb.as_markup())
+            return
+
+        # Один город
+        city = cities[0]
+        weather = get_weather_forecast(city, day_offset)
+        if not weather: weather = f"⚠️ Погода в {city} не найдена."
+        
+        resp = await get_chat_response(message.from_user.id, query, weather, loc_name, "forecast", image_url)
+        await message.reply(resp, parse_mode="Markdown")
+    
+    # === ЛОГИКА ДЛЯ ОБЩИХ ВОПРОСОВ (ФОТО, СНАСТИ) ===
+    else:
+        # Просто отправляем в GPT без погоды
+        resp = await get_chat_response(message.from_user.id, query, "", "", "general", image_url)
+        await message.reply(resp, parse_mode="Markdown")
 
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
@@ -236,6 +255,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     try: asyncio.run(main())
     except: pass
+
+
 
 
 
