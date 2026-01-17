@@ -32,32 +32,37 @@ user_histories: Dict[int, List[Dict]] = {}
 # --- ВЕБ-СЕРВЕР ---
 async def start_web_server():
     app = web.Application()
-    app.router.add_get('/', lambda r: web.Response(text="🎣 Expert Fishing Bot (Russia + Buttons) is Alive!"))
+    app.router.add_get('/', lambda r: web.Response(text="🎣 Expert Fishing Bot (Russia + Better Geo) is Alive!"))
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-# --- 1. AI ГЕО-КОДЕР С ВАРИАНТАМИ ---
+# --- 1. AI ГЕО-КОДЕР (УЛУЧШЕННЫЙ) ---
 async def extract_geo_variants(text: str) -> dict:
     """
-    Возвращает список городов для уточнения.
-    Пример: {"location_name": "Река Ахтуба", "cities": ["Харабали", "Ахтубинск"], "day": 0}
+    Возвращает расширенный список городов.
     """
     system_geo = """
-    Ты — Geo-аналитик. Пользователь спрашивает про рыбалку.
-    Твоя задача:
-    1. Понять название места/водоема.
-    2. Подобрать 2-3 КРУПНЫХ города рядом (где точно есть метеостанции) для уточнения погоды.
-    3. Если пользователь уже указал конкретный город — верни только его в списке.
-    4. Если это маленькая деревня — верни райцентры рядом.
+    Ты — Geo-аналитик и Эксперт по географии России.
+    Пользователь спрашивает про рыбалку на водоеме (река, озеро, вдхр).
+
+    ТВОЯ ЗАДАЧА:
+    1. Определить название водоема.
+    2. Подобрать 3-5 населенных пунктов, стоящих ПРЯМО НА ЭТОМ ВОДОЕМЕ или вплотную к нему.
+    3. Разнеси города географически (например: верховье, среднее течение, низовье).
+    
+    Примеры:
+    - Запрос "Пахра" -> ["Подольск", "Домодедово", "п. Володарского", "Ям"]
+    - Запрос "Волга" -> ["Тверь", "Ярославль", "Казань", "Астрахань"]
+    - Запрос "Рыбинка" -> ["Рыбинск", "Борок", "Весьегонск", "Пошехонье"]
 
     ВЕРНИ ТОЛЬКО JSON:
     {
-      "location_name": "Название места (как в запросе)",
-      "cities": ["Город1", "Город2"],
-      "day_offset": 0 (0-сегодня, 1-завтра, 2-послезавтра)
+      "location_name": "Название (например: Река Пахра)",
+      "cities": ["Город1", "Город2", "Город3", "Город4"],
+      "day_offset": 0
     }
     """
     try:
@@ -65,13 +70,14 @@ async def extract_geo_variants(text: str) -> dict:
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_geo},
-                {"role": "user", "content": f"Запрос: {text}"}
+                {"role": "user", "content": f"Запрос рыбака: {text}"}
             ],
-            temperature=0,
+            temperature=0.3, # Чуть выше 0, чтобы давал разные города
             response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
-    except:
+    except Exception as e:
+        logging.error(f"Geo Error: {e}")
         return {}
 
 # --- 2. ПОГОДА ---
@@ -102,29 +108,29 @@ def get_weather_forecast(city: str, day_offset: int) -> str | None:
 
 # --- 3. GPT РЫБОЛОВ ---
 SYSTEM_PROMPT = """
-Ты — ПРОФЕССИОНАЛЬНЫЙ РЫБОЛОВНЫЙ ГИД ПО РОССИИ. Сейчас 2026 год.
-Твоя задача — дать глубокий прогноз клева.
+Ты — ПРОФЕССИОНАЛЬНЫЙ РЫБОЛОВНЫЙ ГИД. 2026 год.
+Дай прогноз клева, учитывая место, погоду и сезон.
 
-🛑 ЛОГИКА:
-1. АНАЛИЗ ПОГОДЫ: Обязательно используй цифры (давление, ветер) в анализе.
-2. РЕГИОН: Учитывай специфику водоема (Волга, Карелия, Сибирь).
-3. СЕЗОН: Если мороз — ЗИМА (лед, мормышки). Если тепло — ЛЕТО.
+🛑 ПРАВИЛА:
+1. ЦИФРЫ: Используй данные погоды (давление, ветер) для аргументации.
+2. СЕЗОН: Если мороз — ЗИМА (лед, жерлицы). Тепло — ЛЕТО.
+3. МЕСТО: Учитывай особенности конкретной точки (течение, глубины).
 
 ФОРМАТ:
 📍 **[Место] | [Дата]**
 
 🌡 **ПОГОДНЫЙ ВЕРДИКТ:**
-(Как погода влияет на рыбу).
+(Коротко про комфорт и активность рыбы).
 
-🐟 **ПРОГНОЗ:**
-> **[Рыба 1]:** Активность, тактика.
-> **[Рыба 2]:** Активность, тактика.
+🐟 **КТО КЛЮЕТ:**
+> **[Рыба]:** Активность ?/10. Где искать.
+> **[Рыба]:** Активность ?/10.
 
 ⚙️ **СНАСТИ:**
-(Подбери под сезон и место).
+(Тонкости оснастки).
 
 ---
-Ни хвоста, ни чешуи! 🎣
+НХНЧ! 🎣
 """
 
 async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str, image_url: str = None) -> str:
@@ -149,27 +155,22 @@ async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str
         response = client.chat.completions.create(
             model="gpt-4o-mini", messages=user_histories[user_id], temperature=0.7, max_tokens=1000
         )
-        answer = response.choices[0].message.content
-        user_histories[user_id].append({"role": "assistant", "content": answer})
-        return answer
+        return response.choices[0].message.content
     except: return "⚠️ Ошибка AI."
 
 # --- ХЕНДЛЕРЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("👋 Привет! Спроси про любой водоем России: `*Клев на Ахтубе`")
+    await message.answer("👋 Привет! Спроси про любой водоем: `*Клев на Пахре`")
 
-# Обработка выбора города (кнопки)
 @dp.callback_query(F.data.startswith("geo:"))
 async def cb_geo_select(callback: CallbackQuery):
-    # geo:Город:Локация:День
     try:
         _, city, loc, day = callback.data.split(":")
         day = int(day)
         
         weather = get_weather_forecast(city, day)
-        if not weather: 
-            weather = "⚠️ Погода не найдена, но вот прогноз по сезону."
+        if not weather: weather = "⚠️ Погода не найдена."
         
         await callback.message.edit_text(f"✅ Выбрано: {city}. Готовлю прогноз...")
         
@@ -177,7 +178,7 @@ async def cb_geo_select(callback: CallbackQuery):
         response = await get_chat_response(callback.from_user.id, prompt, weather, loc)
         await callback.message.reply(response, parse_mode="Markdown")
     except:
-        await callback.message.edit_text("⚠️ Ошибка обработки.")
+        await callback.message.edit_text("⚠️ Ошибка.")
 
 @dp.message(F.text.startswith("*") | F.caption.startswith("*"))
 async def expert_fishing_handler(message: Message):
@@ -195,25 +196,23 @@ async def expert_fishing_handler(message: Message):
 
     # 2. Логика кнопок
     if not cities:
-        # AI не понял место -> Просто отвечаем общими фразами (Москва фоллбэк)
         weather = get_weather_forecast("Москва", day_offset)
-        msg = f"⚠️ Не нашел такое место на карте. Даю общий прогноз (погода Мск):\n{weather}"
+        msg = f"⚠️ Не нашел место. Прогноз по Москве:\n{weather}"
         resp = await get_chat_response(message.from_user.id, query, msg, loc_name)
         await message.reply(resp, parse_mode="Markdown")
         return
 
     if len(cities) > 1:
-        # Несколько вариантов -> КНОПКИ
+        # Много городов -> Кнопки (до 6 штук, по 2 в ряд)
         kb = InlineKeyboardBuilder()
-        for city in cities:
-            # geo:City:Loc:Day (обрезаем Loc если длинный, Telegram limit 64 bytes)
+        for city in cities[:6]: 
             safe_loc = loc_name[:15]
             kb.button(text=city, callback_data=f"geo:{city}:{safe_loc}:{day_offset}")
         kb.adjust(2)
-        await message.reply(f"📍 **{loc_name}**. Уточните ближайший город:", reply_markup=kb.as_markup())
+        await message.reply(f"📍 **{loc_name}**. Уточните место:", reply_markup=kb.as_markup())
         return
 
-    # Один город -> Сразу ответ
+    # Один город
     city = cities[0]
     weather = get_weather_forecast(city, day_offset)
     if not weather: weather = f"⚠️ Погода в {city} не найдена."
@@ -237,6 +236,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     try: asyncio.run(main())
     except: pass
+
+
 
 
 
