@@ -1,110 +1,283 @@
 import asyncio
-import logging
-import sys
 import datetime
-import requests
-import os
 import json
-from typing import Dict, List, Optional
-from aiohttp import web 
+import logging
+import os
+import sys
+import time
+from typing import Dict, List, Optional, Tuple
+
+import aiohttp
+from aiohttp import web
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
 from openai import OpenAI
 
-# --- КОНФИГУРАЦИЯ ---
+
+# =========================
+# CONFIG
+# =========================
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
+OVERPASS_URL = os.getenv("OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    sys.exit("❌ ОШИБКА: Не найдены ключи в .env")
+    sys.exit("❌ ОШИБКА: Не найдены ключи TELEGRAM_TOKEN / OPENAI_API_KEY в .env")
 
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
+
 user_histories: Dict[int, List[Dict]] = {}
 
-# --- ВЕБ-СЕРВЕР ---
+# loc_id -> {"loc_name": str, "loc_type": str, "day": int, "places": [{"name": str, "place": str, "lat": float, "lon": float}]}
+geo_ctx: Dict[str, Dict] = {}
+
+# Кэш для Overpass
+settlements_cache: Dict[str, Tuple[float, List[Dict]]] = {}
+CACHE_TTL_SEC = 12 * 3600
+
+PLACE_FILTER = "^(city|town|village|hamlet)$"
+PLACE_PRIORITY = {"city": 0, "town": 1, "village": 2, "hamlet": 3}
+
+
+# =========================
+# WEB SERVER (Render healthcheck)
+# =========================
 async def start_web_server():
     app = web.Application()
-    app.router.add_get('/', lambda r: web.Response(text="🎣 Expert Fishing Bot (Final Layout) is Alive!"))
+    app.router.add_get("/", lambda r: web.Response(text="🎣 Expert Fishing Bot (OSM settlements v2) is Alive!"))
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- 1. AI АНАЛИЗАТОР (INTENT) ---
+
+# =========================
+# OVERPASS (OSM)
+# =========================
+async def overpass(query: str) -> dict:
+    timeout = aiohttp.ClientTimeout(total=25)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(OVERPASS_URL, data={"data": query}) as r:
+            r.raise_for_status()
+            return await r.json()
+
+
+def normalize_water_name(name: str) -> str:
+    if not name:
+        return ""
+    n = name.strip()
+    low = n.lower()
+    prefixes = ("река ", "р. ", "озеро ", "пруд ", "вдхр ", "водохранилище ")
+    for p in prefixes:
+        if low.startswith(p):
+            n = n[len(p):].strip()
+            break
+    return n
+
+
+def _gen_loc_id() -> str:
+    # короткий id, безопасный для callback_data (лимит 1–64 байта)
+    # 8 hex-символов = 4 байта
+    return os.urandom(4).hex()
+
+
+async def get_settlements_for_waterbody(location_name: str, location_type: str) -> List[Dict]:
+    """
+    Возвращает населённые пункты, которые реально стоят вдоль реки/водоёма.
+    """
+    water_name = normalize_water_name(location_name)
+    if not water_name:
+        return []
+
+    cache_key = f"{location_type}:{water_name.lower()}"
+    now = time.time()
+    if cache_key in settlements_cache:
+        ts, cached = settlements_cache[cache_key]
+        if (now - ts) < CACHE_TTL_SEC:
+            return cached
+
+    if location_type == "river":
+        water_selector = f'nwr["waterway"="river"]["name"="{water_name}"]'
+    else:
+        water_selector = f'nwr["natural"="water"]["name"="{water_name}"]'
+
+    # Ищем водоём в РФ и населённые пункты рядом
+    q = f"""
+[out:json][timeout:25];
+area["ISO3166-1"="RU"]->.ru;
+(
+  {water_selector}(area.ru);
+)->.w;
+node(around.w:2500)["place"~"{PLACE_FILTER}"]["name"];
+out tags center;
+"""
+
+    try:
+        data = await overpass(q)
+    except Exception:
+        return []
+
+    places: List[Dict] = []
+    seen = set()
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        nm = tags.get("name")
+        pl = tags.get("place")
+        if not nm or not pl:
+            continue
+        if nm in seen:
+            continue
+        seen.add(nm)
+        places.append(
+            {
+                "name": nm,
+                "place": pl,
+                "lat": el.get("lat"),
+                "lon": el.get("lon"),
+            }
+        )
+
+    places.sort(key=lambda x: (PLACE_PRIORITY.get(x.get("place", ""), 9), x.get("name", "")))
+    places = places[:25]  # ограничение на всякий случай
+
+    settlements_cache[cache_key] = (now, places)
+    return places
+
+
+# =========================
+# 1) INTENT ANALYZER (LLM -> JSON)
+# =========================
 async def analyze_user_query(text: str) -> dict:
-    """
-    Классифицирует запрос.
-    """
     system_prompt = """
-    Ты — Логический центр. Определи суть вопроса.
+Ты — Логический центр. Определи суть вопроса и верни JSON.
 
-    ТИПЫ (intent):
-    1. "forecast" — Запрос ПРОГНОЗА ("Клев на Оке", "Погода в Муроме").
-    2. "fish_search" — Поиск места ("Где ловить форель?", "Куда за щукой?").
-    3. "general" — Общие вопросы, снасти, фото.
+ТИПЫ (intent):
+1) "forecast" — запрос ПРОГНОЗА ("Клев на Оке", "Клев на Истринском вдхр", "Погода в Муроме").
+2) "fish_search" — поиск места/тактики ("Где ловить форель?", "Куда за щукой?").
+3) "general" — общие вопросы, снасти, фото.
 
-    ВЫВОД (JSON):
-    Если forecast:
-      - location_name: "Река Ока" (или "г. Муром")
-      - cities: ["Муром"] (Список городов. Если запрос про реку - дай 3-4 города на ней. Если про город - верни этот город).
-    
-    Если fish_search:
-      - target_fish: "Форель"
-      - cities: []
-    
-    Если general:
-      - intent="general".
-    """
+ВАЖНО (для forecast):
+- location_type: "river" | "lake" | "reservoir" | "pond" | "city"
+- location_name: нормализованное имя ("Ока", "Пахра", "Истринское водохранилище", "Муром")
+
+ФОРМАТ ВЫВОДА:
+forecast:
+{
+  "intent": "forecast",
+  "location_type": "river",
+  "location_name": "Ока"
+}
+
+fish_search:
+{
+  "intent": "fish_search",
+  "target_fish": "Форель"
+}
+
+general:
+{
+  "intent": "general"
+}
+"""
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Запрос: {text}"}
+                {"role": "user", "content": f"Запрос: {text}"},
             ],
             temperature=0,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
         )
         return json.loads(response.choices[0].message.content)
-    except:
+    except Exception:
         return {"intent": "general"}
 
-# --- 2. ПОГОДА ---
-def get_moon_phase():
-    phases = ["🌑 Новолуние", "🌒 Растущая", "🌓 1-я четверть", "🌔 Растущая", "🌕 Полнолуние", "🌖 Убывающая", "🌗 Последняя четверть", "🌘 Старая"]
+
+# =========================
+# 2) WEATHER (OpenWeather)
+# =========================
+def get_moon_phase() -> str:
+    phases = [
+        "🌑 Новолуние",
+        "🌒 Растущая",
+        "🌓 1-я четверть",
+        "🌔 Растущая",
+        "🌕 Полнолуние",
+        "🌖 Убывающая",
+        "🌗 Последняя четверть",
+        "🌘 Старая",
+    ]
     days = (datetime.date.today() - datetime.date(2000, 1, 6)).days
     return phases[int(((days % 29.53) / 29.53) * 8) % 8]
 
-def get_weather_forecast(city: str, day_offset: int) -> str | None:
-    if not OPENWEATHER_API_KEY or not city: return None
-    if day_offset > 2: day_offset = 2
+
+async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
+    if not OPENWEATHER_API_KEY or not city:
+        return None
+    if day_offset > 2:
+        day_offset = 2
+
+    url = "https://api.openweathermap.org/data/2.5/forecast"
+    params = {
+        "q": city,
+        "appid": OPENWEATHER_API_KEY,
+        "units": "metric",
+        "lang": "ru",
+    }
+
     try:
-        url = f"http://api.openweathermap.org/data/2.5/forecast?q={city}&appid={OPENWEATHER_API_KEY}&units=metric&lang=ru"
-        r = requests.get(url, timeout=4).json()
-        if str(r.get("cod")) != "200": return None
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as r:
+                data = await r.json()
+    except Exception:
+        return None
 
-        target_date = datetime.date.today() + datetime.timedelta(days=day_offset)
-        target_str = target_date.strftime("%Y-%m-%d")
-        
-        forecasts = r.get("list", [])
-        day_data = [f for f in forecasts if target_str in f["dt_txt"]]
-        if not day_data and day_offset == 0: day_data = forecasts[:3] # Если вечер
-        if not day_data: return None
-        
-        best = next((f for f in day_data if "12:00" in f["dt_txt"]), day_data[0])
-        return f"📍 {city} | {target_str}\n🌡 Темп: {best['main']['temp']}°C ({best['weather'][0]['description']})\n🔽 Давление: {int(best['main']['pressure']*0.75006)} мм рт.ст.\n💨 Ветер: {best['wind']['speed']} м/с\n🌙 Луна: {get_moon_phase()}"
-    except: return None
+    if str(data.get("cod")) != "200":
+        return None
 
-# --- 3. GPT ЭКСПЕРТ (СТРОГИЙ ФОРМАТ) ---
+    target_date = datetime.date.today() + datetime.timedelta(days=day_offset)
+    target_str = target_date.strftime("%Y-%m-%d")
+
+    forecasts = data.get("list", [])
+    day_data = [f for f in forecasts if target_str in f.get("dt_txt", "")]
+    if not day_data and day_offset == 0:
+        day_data = forecasts[:3]
+    if not day_data:
+        return None
+
+    best = next((f for f in day_data if "12:00" in f.get("dt_txt", "")), day_data[0])
+
+    temp = best["main"]["temp"]
+    pressure = int(best["main"]["pressure"] * 0.75006)
+    wind = best["wind"]["speed"]
+    desc = best["weather"][0]["description"]
+    moon = get_moon_phase()
+
+    return (
+        f"📍 {city} | {target_str}\n"
+        f"🌡 Темп: {temp}°C ({desc})\n"
+        f"🔽 Давление: {pressure} мм рт.ст.\n"
+        f"💨 Ветер: {wind} м/с\n"
+        f"🌙 Луна: {moon}"
+    )
+
+
+# =========================
+# 3) EXPERT LLM (FORMAT НЕ ТРОГАЕМ)
+# =========================
 SYSTEM_PROMPT = """
 Ты — ЭЛИТНЫЙ РЫБОЛОВНЫЙ ГИД (Стаж 30 лет).
 Твоя задача — дать экспертный прогноз, строго соблюдая структуру.
@@ -137,117 +310,240 @@ SYSTEM_PROMPT = """
 Ни хвоста, ни чешуи! 🎣
 """
 
-async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str, intent: str, image_url: str = None) -> str:
-    now = datetime.datetime.now()
-    date_str = now.strftime("%d.%m.%Y")
-    
+
+async def get_chat_response(
+    user_id: int,
+    text: str,
+    weather: str,
+    loc_name: str,
+    intent: str,
+) -> str:
+    date_str = datetime.datetime.now().strftime("%d.%m.%Y")
+
     if user_id not in user_histories:
         user_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     if intent == "forecast":
-        user_prompt = f"ЗАПРОС: {text}\n📅 ДАТА: {date_str}\n\n📊 ДАННЫЕ ПОГОДЫ:\n{weather}\n\n(Обязательно используй эти данные в разделе 'АНАЛИЗ ПОГОДЫ'!)"
+        user_prompt = (
+            f"ЗАПРОС: {text}\n"
+            f"📅 ДАТА: {date_str}\n\n"
+            f"📊 ДАННЫЕ ПОГОДЫ:\n{weather}\n\n"
+            f"(Обязательно используй эти данные в разделе 'АНАЛИЗ ПОГОДЫ'!)"
+        )
     elif intent == "fish_search":
         user_prompt = f"ВОПРОС: {text}\n(Назови лучшие места для ловли этой рыбы. Погода не нужна)."
     else:
         user_prompt = f"ВОПРОС: {text}\n(Ответь как эксперт)."
 
-    content_payload = [{"type": "text", "text": user_prompt}]
-    if image_url: content_payload.append({"type": "image_url", "image_url": {"url": image_url}})
+    user_histories[user_id].append({"role": "user", "content": user_prompt})
 
-    user_histories[user_id].append({"role": "user", "content": content_payload})
-    if len(user_histories[user_id]) > 8: 
+    if len(user_histories[user_id]) > 8:
         user_histories[user_id] = [user_histories[user_id][0]] + user_histories[user_id][-6:]
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini", messages=user_histories[user_id], temperature=0.6, max_tokens=1200
+            model="gpt-4o-mini",
+            messages=user_histories[user_id],
+            temperature=0.6,
+            max_tokens=1200,
         )
         answer = response.choices[0].message.content
         user_histories[user_id].append({"role": "assistant", "content": answer})
         return answer
-    except: return "⚠️ Ошибка AI."
+    except Exception:
+        return "⚠️ Ошибка AI."
 
-# --- ХЕНДЛЕРЫ ---
+
+# =========================
+# HANDLERS
+# =========================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("👋 Привет! Я готов. Спрашивай:\n`*Клев в Муроме`\n`*Погода на Оке`")
+    await message.answer("👋 Привет! Я готов.\nСпроси так:\n`*Клев на Оке`\n`*Клев на Пахре`\n`*Клев в Муроме`")
+
+
+@dp.callback_query(F.data.startswith("geo_more:"))
+async def cb_geo_more(callback: CallbackQuery):
+    """
+    Показать все населённые пункты (включая деревни/посёлки) для данного loc_id.
+    """
+    try:
+        _, loc_id = callback.data.split(":")
+        ctx = geo_ctx.get(loc_id)
+        if not ctx:
+            await callback.message.edit_text("⚠️ Контекст устарел. Повтори запрос.")
+            return
+
+        places = ctx.get("places", [])
+        loc_name = ctx.get("loc_name", "Водоем")
+
+        kb = InlineKeyboardBuilder()
+        for i, p in enumerate(places[:25]):
+            kb.button(text=p["name"], callback_data=f"geo:{loc_id}:{i}")
+        kb.adjust(2)
+
+        await callback.message.edit_text(
+            f"📍 **{loc_name}**. Выберите населённый пункт (включая деревни):",
+            reply_markup=kb.as_markup(),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        await callback.message.edit_text("⚠️ Сбой.")
+
 
 @dp.callback_query(F.data.startswith("geo:"))
 async def cb_geo_select(callback: CallbackQuery):
+    """
+    callback_data: geo:<loc_id>:<idx>
+    """
     try:
-        _, city, loc, day = callback.data.split(":")
-        day = int(day)
-        weather = get_weather_forecast(city, day) or "⚠️ Погода не найдена."
-        
+        _, loc_id, idx_s = callback.data.split(":")
+        idx = int(idx_s)
+        ctx = geo_ctx.get(loc_id)
+
+        if not ctx:
+            await callback.message.edit_text("⚠️ Контекст устарел. Повтори запрос.")
+            return
+
+        places = ctx.get("places", [])
+        if idx < 0 or idx >= len(places):
+            await callback.message.edit_text("⚠️ Некорректный выбор. Повтори запрос.")
+            return
+
+        city = places[idx]["name"]
+        loc_name = ctx.get("loc_name", "Водоем")
+        day = int(ctx.get("day", 0))
+
+        weather = await get_weather_forecast(city, day) or f"⚠️ Погода в {city} не найдена."
         await callback.message.edit_text(f"✅ Точка: {city}. Анализирую...")
-        response = await get_chat_response(callback.from_user.id, f"Клев на {loc}", weather, loc, "forecast")
+
+        response = await get_chat_response(
+            callback.from_user.id,
+            f"Клев на {loc_name} (район {city})",
+            weather,
+            loc_name,
+            "forecast",
+        )
         await callback.message.reply(response, parse_mode="Markdown")
-    except:
+    except Exception:
         await callback.message.edit_text("⚠️ Сбой.")
 
-@dp.message(F.text.startswith("*") | F.caption.startswith("*"))
+
+@dp.message((F.text & F.text.startswith("*")) | (F.caption & F.caption.startswith("*")))
 async def expert_fishing_handler(message: Message):
-    full_text = message.caption if message.photo else message.text
-    if not full_text: return
-    
+    full_text = message.caption if message.caption else message.text
+    if not full_text:
+        return
+
     query = full_text[1:].strip()
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     analysis = await analyze_user_query(query)
     intent = analysis.get("intent", "general")
-    
-    image_url = None
-    if message.photo:
-        f = await message.bot.get_file(message.photo[-1].file_id)
-        image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{f.file_path}"
 
+    # ---------- FORECAST ----------
     if intent == "forecast":
-        cities = analysis.get("cities", [])
         loc_name = analysis.get("location_name", "Водоем")
-        day_offset = 0 # По умолчанию сегодня, если AI не выделил иное
-        
-        if not cities:
-            weather = get_weather_forecast("Москва", 0)
-            msg = f"⚠️ Не нашел точное место. Прогноз по Москве:\n{weather}"
-            resp = await get_chat_response(message.from_user.id, query, msg, loc_name, "forecast", image_url)
+        loc_type = analysis.get("location_type", "city")
+        day_offset = 0
+
+        if loc_type in {"river", "lake", "reservoir", "pond"}:
+            places = await get_settlements_for_waterbody(loc_name, loc_type)
+
+            if places:
+                loc_id = _gen_loc_id()
+                geo_ctx[loc_id] = {
+                    "loc_name": loc_name,
+                    "loc_type": loc_type,
+                    "day": day_offset,
+                    "places": places,
+                }
+
+                # Разделяем на крупные и мелкие
+                primary_idx = [i for i, p in enumerate(places) if p.get("place") in {"city", "town"}]
+                secondary_idx = [i for i, p in enumerate(places) if p.get("place") in {"village", "hamlet"}]
+
+                kb = InlineKeyboardBuilder()
+
+                # Если есть города/крупные посёлки — показываем сначала их
+                if primary_idx:
+                    for i in primary_idx[:6]:
+                        kb.button(text=places[i]["name"], callback_data=f"geo:{loc_id}:{i}")
+                    # Если есть мелкие — добавляем кнопку "Показать деревни/посёлки"
+                    if secondary_idx:
+                        kb.button(text="Показать деревни/посёлки", callback_data=f"geo_more:{loc_id}")
+                    kb.adjust(2)
+                    await message.reply(
+                        f"📍 **{loc_name}**. Выберите город/крупный посёлок на этом водоёме:",
+                        reply_markup=kb.as_markup(),
+                        parse_mode="Markdown",
+                    )
+                    return
+
+                # Если только деревни/посёлки — сразу даём всё (до 6–10 штук)
+                for i in secondary_idx[:10]:
+                    kb.button(text=places[i]["name"], callback_data=f"geo:{loc_id}:{i}")
+                kb.adjust(2)
+                await message.reply(
+                    f"📍 **{loc_name}**. Выберите населённый пункт на этом водоёме:",
+                    reply_markup=kb.as_markup(),
+                    parse_mode="Markdown",
+                )
+                return
+
+            # OSM ничего не нашёл
+            weather = await get_weather_forecast("Москва", day_offset) or "⚠️ Погода не найдена."
+            msg = f"⚠️ Не смог найти населённые пункты для '{loc_name}'. Дам прогноз по Москве:\n{weather}"
+            resp = await get_chat_response(message.from_user.id, query, msg, loc_name, "forecast")
             await message.reply(resp, parse_mode="Markdown")
             return
 
-        # Если городов много -> Кнопки
-        if len(cities) > 1:
-            kb = InlineKeyboardBuilder()
-            for city in cities[:6]: 
-                safe_loc = loc_name[:15]
-                kb.button(text=city, callback_data=f"geo:{city}:{safe_loc}:{day_offset}")
-            kb.adjust(2)
-            await message.reply(f"📍 **{loc_name}**. Уточните точку:", reply_markup=kb.as_markup())
+        # Город
+        if loc_type == "city":
+            city = loc_name
+            weather = await get_weather_forecast(city, day_offset) or f"⚠️ Погода в {city} не найдена."
+            resp = await get_chat_response(message.from_user.id, query, weather, loc_name, "forecast")
+            await message.reply(resp, parse_mode="Markdown")
             return
 
-        # Если город один (Муром) -> Сразу ответ с погодой
-        city = cities[0]
-        weather = get_weather_forecast(city, day_offset) or f"⚠️ Погода в {city} не найдена."
-        resp = await get_chat_response(message.from_user.id, query, weather, loc_name, "forecast", image_url)
+        # Фоллбек
+        weather = await get_weather_forecast("Москва", day_offset) or "⚠️ Погода не найдена."
+        resp = await get_chat_response(message.from_user.id, query, weather, loc_name, "forecast")
         await message.reply(resp, parse_mode="Markdown")
-        
-    elif intent == "fish_search":
-        resp = await get_chat_response(message.from_user.id, query, "", "", "fish_search", image_url)
-        await message.reply(resp, parse_mode="Markdown")
-        
-    else:
-        resp = await get_chat_response(message.from_user.id, query, "", "", "general", image_url)
-        await message.reply(resp, parse_mode="Markdown")
+        return
 
+    # ---------- FISH SEARCH ----------
+    if intent == "fish_search":
+        resp = await get_chat_response(message.from_user.id, query, "", "", "fish_search")
+        await message.reply(resp, parse_mode="Markdown")
+        return
+
+    # ---------- GENERAL ----------
+    resp = await get_chat_response(message.from_user.id, query, "", "", "general")
+    await message.reply(resp, parse_mode="Markdown")
+
+
+# =========================
+# RUN
+# =========================
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(start_web_server())
-    try: await dp.start_polling(bot)
-    finally: await bot.session.close()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    try: asyncio.run(main())
-    except: pass
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+    try:
+        asyncio.run(main())
+    except Exception:
+        pass
+
+
 
 
 
