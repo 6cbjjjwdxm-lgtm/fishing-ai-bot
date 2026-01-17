@@ -1,7 +1,7 @@
-aiogram==3.4.1
-aiohttp==3.9.3
-openai==1.35.3
-python-dotenv==1.0.0
-requests==2.31.0
+git add .
+git commit -m "Fix aiogram3 imports"
+git push
+
+
 
 
