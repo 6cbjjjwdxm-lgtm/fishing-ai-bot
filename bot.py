@@ -124,10 +124,16 @@ def _gen_loc_id() -> str:
     return os.urandom(4).hex()
 
 
+# Расширяем типы, чтобы поймать "омуты/урочища" и т.п.
+PLACE_FILTER = "^(city|town|village|hamlet|locality)$"
+PLACE_PRIORITY = {"city": 0, "town": 1, "village": 2, "hamlet": 3, "locality": 4}
+
 async def get_settlements_for_waterbody(location_name: str, location_type: str) -> List[Dict]:
     """
-    Возвращает населённые пункты вдоль реки/водоёма из OSM через Overpass.
-    around.<set>:radius — стандартный паттерн Overpass QL. [web:135]
+    Более точная версия:
+    - для river ищем relation/ways реки
+    - берём member ways и их nodes
+    - ищем place=* вокруг nodes русла (а не вокруг "чего угодно с таким name")
     """
     water_name = normalize_water_name(location_name)
     if not water_name:
@@ -140,18 +146,46 @@ async def get_settlements_for_waterbody(location_name: str, location_type: str) 
         if (now - ts) < CACHE_TTL_SEC:
             return cached
 
-    if location_type == "river":
-        water_selector = f'nwr["waterway"="river"]["name"="{water_name}"]'
-    else:
-        water_selector = f'nwr["natural"="water"]["name"="{water_name}"]'
+    # Радиус вокруг русла (можно поднять до 2000, если будут пропуски деревень)
+    RIVER_AROUND_M = 1500
 
-    q = f"""
+    if location_type == "river":
+        q = f"""
 [out:json][timeout:25];
 area["ISO3166-1"="RU"]->.ru;
+
+// 1) Ищем реку как relation (если есть) и как way-сегменты
 (
-  {water_selector}(area.ru);
-)->.w;
-node(around.w:2500)["place"~"{PLACE_FILTER}"]["name"];
+  relation(area.ru)["type"="waterway"]["waterway"="river"]["name"="{water_name}"];
+  way(area.ru)["waterway"="river"]["name"="{water_name}"];
+)->.river;
+
+// 2) Берём ways русла (включая member ways relation)
+way(r.river)->.riverWays;
+
+// 3) Берём узлы русла
+node(w.riverWays)->.riverNodes;
+
+// 4) Ищем населённые пункты рядом с узлами русла
+node(around.riverNodes:{RIVER_AROUND_M})["place"~"{PLACE_FILTER}"]["name"];
+out tags center;
+"""
+    else:
+        # для озёр/вдхр/прудов — natural=water, потом nodes контура и place вокруг
+        WATER_AROUND_M = 2500
+        q = f"""
+[out:json][timeout:25];
+area["ISO3166-1"="RU"]->.ru;
+
+(
+  way(area.ru)["natural"="water"]["name"="{water_name}"];
+  relation(area.ru)["natural"="water"]["name"="{water_name}"];
+)->.wb;
+
+way(r.wb)->.wbWays;
+node(w.wbWays)->.wbNodes;
+
+node(around.wbNodes:{WATER_AROUND_M})["place"~"{PLACE_FILTER}"]["name"];
 out tags center;
 """
 
@@ -162,8 +196,9 @@ out tags center;
 
     places: List[Dict] = []
     seen = set()
+
     for el in data.get("elements", []):
-        tags = el.get("tags", {})
+        tags = el.get("tags", {}) or {}
         nm = tags.get("name")
         pl = tags.get("place")
         if not nm or not pl:
@@ -174,10 +209,13 @@ out tags center;
         places.append({"name": nm, "place": pl})
 
     places.sort(key=lambda x: (PLACE_PRIORITY.get(x.get("place", ""), 9), x.get("name", "")))
-    places = places[:30]
+
+    # больше лимит — чтобы через "Показать деревни/посёлки" было что показывать
+    places = places[:40]
 
     settlements_cache[cache_key] = (now, places)
     return places
+
 
 
 # =========================
@@ -607,6 +645,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except Exception:
         pass
+
 
 
 
