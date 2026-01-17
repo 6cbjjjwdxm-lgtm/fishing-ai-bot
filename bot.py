@@ -38,11 +38,10 @@ if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
 dp = Dispatcher()
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# История диалогов LLM
 user_histories: Dict[int, List[Dict]] = {}
 
-# Контекст кнопок (делаем callback_data коротким, т.к. у Telegram лимит)
-# callback_data ограничен 64 байтами, поэтому храним большие данные в памяти по loc_id. [web:113][web:112]
+# callback_data имеет лимит, поэтому большие данные держим в памяти по loc_id. [web:113]
+# loc_id -> {"loc_name": str, "loc_type": str, "day": int, "places": [{"name": str, "place": str}]}
 geo_ctx: Dict[str, Dict] = {}
 
 # Кэш Overpass
@@ -54,7 +53,7 @@ PLACE_PRIORITY = {"city": 0, "town": 1, "village": 2, "hamlet": 3}
 
 
 # =========================
-# Helpers: safe send/edit
+# Safe send/edit (чтобы не падало из-за Markdown)
 # =========================
 async def safe_send_markdown(message: Message, text: str):
     try:
@@ -67,7 +66,6 @@ async def safe_edit_markdown(message: Message, text: str, reply_markup=None):
     try:
         await message.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
     except TelegramBadRequest:
-        # если Markdown развалился — редактируем без parse_mode
         await message.edit_text(text, reply_markup=reply_markup)
 
 
@@ -76,12 +74,26 @@ async def safe_edit_markdown(message: Message, text: str, reply_markup=None):
 # =========================
 async def start_web_server():
     app = web.Application()
-    app.router.add_get("/", lambda r: web.Response(text="🎣 Expert Fishing Bot (OSM + show more) is Alive!"))
+    app.router.add_get("/", lambda r: web.Response(text="🎣 Expert Fishing Bot (OSM settlements v3) is Alive!"))
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+
+
+# =========================
+# DAY OFFSET
+# =========================
+def extract_day_offset(text: str) -> int:
+    t = (text or "").lower()
+    if "послезавтра" in t:
+        return 2
+    if "завтра" in t:
+        return 1
+    if "сегодня" in t:
+        return 0
+    return 0
 
 
 # =========================
@@ -109,14 +121,13 @@ def normalize_water_name(name: str) -> str:
 
 
 def _gen_loc_id() -> str:
-    # короткий id для callback_data
     return os.urandom(4).hex()
 
 
 async def get_settlements_for_waterbody(location_name: str, location_type: str) -> List[Dict]:
     """
     Возвращает населённые пункты вдоль реки/водоёма из OSM через Overpass.
-    around.<set>:radius — стандартный паттерн Overpass QL для поиска объектов рядом с элементами набора. [web:135]
+    around.<set>:radius — стандартный паттерн Overpass QL. [web:135]
     """
     water_name = normalize_water_name(location_name)
     if not water_name:
@@ -132,10 +143,8 @@ async def get_settlements_for_waterbody(location_name: str, location_type: str) 
     if location_type == "river":
         water_selector = f'nwr["waterway"="river"]["name"="{water_name}"]'
     else:
-        # lake/reservoir/pond часто natural=water
         water_selector = f'nwr["natural"="water"]["name"="{water_name}"]'
 
-    # Ищем водоём в РФ, затем place=* рядом с ним
     q = f"""
 [out:json][timeout:25];
 area["ISO3166-1"="RU"]->.ru;
@@ -162,49 +171,96 @@ out tags center;
         if nm in seen:
             continue
         seen.add(nm)
-        places.append({"name": nm, "place": pl, "lat": el.get("lat"), "lon": el.get("lon")})
+        places.append({"name": nm, "place": pl})
 
     places.sort(key=lambda x: (PLACE_PRIORITY.get(x.get("place", ""), 9), x.get("name", "")))
-    places = places[:30]  # ограничение, чтобы не перегружать кнопками/памятью
+    places = places[:30]
 
     settlements_cache[cache_key] = (now, places)
     return places
 
 
 # =========================
+# LLM fallback: если OSM не нашёл (или вернул 0)
+# =========================
+async def llm_settlements_fallback(loc_name: str, loc_type: str) -> List[Dict]:
+    """
+    Запасной вариант: просим LLM назвать населённые пункты НА ЭТОМ водоёме.
+    Это нужно, когда:
+    - LLM дал не то имя,
+    - OSM/Overpass не нашёл объект,
+    - есть ограничения/таймауты.
+    """
+    system_prompt = """
+Ты — справочник по географии России.
+
+Задача: если пользователь спрашивает про клёв на реке/озере/водохранилище, нужно дать СПИСОК населённых пунктов,
+которые реально стоят на этой реке/водоёме (не просто ближайший большой город).
+
+Верни JSON:
+{
+  "places": [
+    {"name": "Подольск", "place": "city"},
+    {"name": "Дубровицы", "place": "village"}
+  ]
+}
+
+Правила:
+- place только из: city|town|village|hamlet
+- названия: как обычно пишутся на русском
+- 6..12 пунктов, если можешь, иначе сколько знаешь
+"""
+    try:
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Водоём: {loc_name}\nТип: {loc_type}"},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+            max_tokens=300,
+        )
+        obj = json.loads(r.choices[0].message.content)
+        places = obj.get("places", [])
+        # нормализация + отсев мусора
+        out = []
+        for p in places:
+            nm = (p.get("name") or "").strip()
+            pl = (p.get("place") or "").strip()
+            if nm and pl in {"city", "town", "village", "hamlet"}:
+                out.append({"name": nm, "place": pl})
+        out.sort(key=lambda x: (PLACE_PRIORITY.get(x.get("place", ""), 9), x.get("name", "")))
+        return out[:25]
+    except Exception:
+        return []
+
+
+# =========================
 # 1) INTENT ANALYZER (LLM -> JSON)
 # =========================
 async def analyze_user_query(text: str) -> dict:
+    # ВАЖНО: просим ИМЕНИТЕЛЬНЫЙ падеж, чтобы Overpass находил name="Пахра", а не "Пахре".
     system_prompt = """
 Ты — Логический центр. Определи суть вопроса и верни JSON.
 
 ТИПЫ (intent):
-1) "forecast" — запрос ПРОГНОЗА ("Клев на Оке", "Клев на Истринском вдхр", "Погода в Муроме").
+1) "forecast" — запрос ПРОГНОЗА ("Клев на Оке", "Клев на Пахре завтра", "Клев на Истринском вдхр").
 2) "fish_search" — поиск места/тактики ("Где ловить форель?", "Куда за щукой?").
 3) "general" — общие вопросы, снасти, фото.
 
 ВАЖНО (для forecast):
 - location_type: "river" | "lake" | "reservoir" | "pond" | "city"
-- location_name: нормализованное имя ("Ока", "Пахра", "Истринское водохранилище", "Муром")
+- location_name: ОБЯЗАТЕЛЬНО в именительном падеже, без предлогов.
+  Примеры: "Пахра" (не "Пахре"), "Ока" (не "Оке"), "Муром".
 
-ФОРМАТ ВЫВОДА:
+ФОРМАТ:
 forecast:
-{
-  "intent": "forecast",
-  "location_type": "river",
-  "location_name": "Ока"
-}
-
+{"intent":"forecast","location_type":"river","location_name":"Пахра"}
 fish_search:
-{
-  "intent": "fish_search",
-  "target_fish": "Форель"
-}
-
+{"intent":"fish_search","target_fish":"Форель"}
 general:
-{
-  "intent": "general"
-}
+{"intent":"general"}
 """
     try:
         response = client.chat.completions.create(
@@ -364,16 +420,13 @@ async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str
 # =========================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("👋 Привет! Я готов.\nПримеры:\n`*Клев на Оке`\n`*Клев на Пахре`\n`*Клев в Муроме`")
+    await message.answer("👋 Привет! Пиши со звёздочки:\n`*клев на Пахре завтра`\n`*клев на Оке`\n`*клев в Муроме`")
 
 
 @dp.callback_query(F.data.startswith("geo_more:"))
 async def cb_geo_more(callback: CallbackQuery):
-    """
-    callback_data: geo_more:<loc_id>
-    """
     try:
-        await callback.answer()  # важно, чтобы Telegram не "крутил" ожидание [web:45]
+        await callback.answer()  # подтверждение callback обязательно для нормального UX [web:45]
         _, loc_id = callback.data.split(":", 1)
 
         ctx = geo_ctx.get(loc_id)
@@ -404,12 +457,8 @@ async def cb_geo_more(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("geo:"))
 async def cb_geo_select(callback: CallbackQuery):
-    """
-    callback_data: geo:<loc_id>:<idx>
-    """
     try:
-        await callback.answer()  # важно [web:45]
-
+        await callback.answer()  # [web:45]
         _, loc_id, idx_s = callback.data.split(":")
         idx = int(idx_s)
 
@@ -438,7 +487,6 @@ async def cb_geo_select(callback: CallbackQuery):
             "forecast",
         )
         await safe_send_markdown(callback.message, response)
-
     except Exception:
         logging.exception("cb_geo_select failed")
         try:
@@ -456,6 +504,7 @@ async def expert_fishing_handler(message: Message):
     query = full_text[1:].strip()
     await message.bot.send_chat_action(message.chat.id, "typing")
 
+    day_offset = extract_day_offset(query)
     analysis = await analyze_user_query(query)
     intent = analysis.get("intent", "general")
 
@@ -463,11 +512,12 @@ async def expert_fishing_handler(message: Message):
     if intent == "forecast":
         loc_name = analysis.get("location_name", "Водоем")
         loc_type = analysis.get("location_type", "city")
-        day_offset = 0
 
-        # Река/водоём -> получаем поселения из OSM
+        # Река/водоём -> ВСЕГДА показываем выбор населённого пункта (OSM -> fallback LLM)
         if loc_type in {"river", "lake", "reservoir", "pond"}:
             places = await get_settlements_for_waterbody(loc_name, loc_type)
+            if not places:
+                places = await llm_settlements_fallback(loc_name, loc_type)
 
             if places:
                 loc_id = _gen_loc_id()
@@ -478,16 +528,13 @@ async def expert_fishing_handler(message: Message):
 
                 kb = InlineKeyboardBuilder()
 
-                # 1) сначала показываем города/крупные посёлки
                 if primary_idx:
                     for i in primary_idx[:6]:
                         kb.button(text=places[i]["name"], callback_data=f"geo:{loc_id}:{i}")
-
-                    # 2) если есть деревни/посёлки — добавляем "Показать..."
                     if secondary_idx:
                         kb.button(text="Показать деревни/посёлки", callback_data=f"geo_more:{loc_id}")
-
                     kb.adjust(2)
+
                     await message.reply(
                         f"📍 **{loc_name}**. Выберите город/крупный посёлок на этом водоёме:",
                         reply_markup=kb.as_markup(),
@@ -499,6 +546,7 @@ async def expert_fishing_handler(message: Message):
                 for i in secondary_idx[:10]:
                     kb.button(text=places[i]["name"], callback_data=f"geo:{loc_id}:{i}")
                 kb.adjust(2)
+
                 await message.reply(
                     f"📍 **{loc_name}**. Выберите населённый пункт на этом водоёме:",
                     reply_markup=kb.as_markup(),
@@ -506,7 +554,7 @@ async def expert_fishing_handler(message: Message):
                 )
                 return
 
-            # Фоллбек, если OSM не вернул поселения
+            # если совсем ничего не нашли — честный fallback
             weather = await get_weather_forecast("Москва", day_offset) or "⚠️ Погода не найдена."
             msg = f"⚠️ Не смог найти населённые пункты для '{loc_name}'. Дам прогноз по Москве:\n{weather}"
             resp = await get_chat_response(message.from_user.id, query, msg, loc_name, "forecast")
@@ -521,7 +569,7 @@ async def expert_fishing_handler(message: Message):
             await safe_send_markdown(message, resp)
             return
 
-        # Общий фоллбек
+        # Общий fallback
         weather = await get_weather_forecast("Москва", day_offset) or "⚠️ Погода не найдена."
         resp = await get_chat_response(message.from_user.id, query, weather, loc_name, "forecast")
         await safe_send_markdown(message, resp)
@@ -559,30 +607,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except Exception:
         pass
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
