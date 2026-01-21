@@ -72,33 +72,43 @@ def get_moon_phase() -> str:
     return phases[int(((days % 29.53) / 29.53) * 8) % 8]
 
 async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
-    if not OPENWEATHER_API_KEY or not city: return None
-    if day_offset > 2: day_offset = 2
+    # ... (начало функции) ...
 
-    # ВАЖНО: Добавляем страну RU, чтобы не искать Oke в Нигерии
-    # Если город уже содержит запятую (напр "Москва, RU"), не дублируем
-    q_param = city if "," in city else f"{city},RU"
-
+    # Список вариантов поиска (от точного к общему)
+    # 1. "Ям, Moscow Oblast, RU" (Самый точный для МО)
+    # 2. "Ям, RU" (По всей России)
+    # 3. "Ям" (Как есть)
+    
+    queries = [
+        f"{city}, Moscow Oblast, RU", 
+        f"{city}, RU", 
+        city
+    ]
+    
     url = "https://api.openweathermap.org/data/2.5/forecast"
-    params = {"q": q_param, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"}
+    base_params = {"appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"}
 
-    try:
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as r:
-                if r.status != 200:
-                    # Попытка №2 без RU (для редких случаев)
-                    if "RU" in q_param:
-                        params["q"] = city
-                        async with session.get(url, params=params) as r2:
-                            if r2.status != 200: return None
-                            data = await r2.json()
-                    else:
-                        return None
-                else:
-                    data = await r.json()
-    except Exception:
-        return None
+    timeout = aiohttp.ClientTimeout(total=5)
+    
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        data = None
+        # Пробуем варианты по очереди
+        for q in queries:
+            params = base_params.copy()
+            params["q"] = q
+            try:
+                async with session.get(url, params=params) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        # Если нашли - отлично, выходим из цикла
+                        if data.get("cod") == "200":
+                            break
+            except Exception:
+                continue
+        
+        if not data: return None
+
+    # ... (дальше парсинг JSON как обычно) ...
 
     target_date = datetime.date.today() + datetime.timedelta(days=day_offset)
     target_str = target_date.strftime("%Y-%m-%d")
@@ -236,54 +246,93 @@ async def main_handler(message: Message):
     text = message.caption or message.text
     query = text[1:].strip()
     
-    # Визуально показываем, что бот "печатает", но не блокируем код
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     day_offset = extract_day_offset(query)
     
-    # 1. Анализ интента (LLM)
+    # 1. Анализ интента
     analysis = await analyze_user_query(query)
     intent = analysis.get("intent", "general")
-    loc_name = analysis.get("location_name", "").title() # Нормализуем регистр
-
-    # 2. Если прогноз - ищем в кэше Русфишинга
+    # Принудительно чистим название от мусора
+    raw_loc = analysis.get("location_name", "").strip()
+    
+    # 2. Логика поиска в кэше
     if intent == "forecast":
-        # Пробуем найти реку в нашем кэше (нечеткий поиск можно добавить позже)
-        # Сейчас ищем точное вхождение или "содержится в"
         found_river = None
+        
+        # Нормализация для поиска: "Оке" -> "ока", "Иваньковском" -> "иваньковск"
+        # Простой способ: перебор ключей кэша и проверка вхождения В НИХ (или ИХ в запрос)
+        
+        # Создаем мапу нормализованных ключей для поиска
+        # "ока": "Ока", "москва": "Москва-река", "можай": "Можайское вдхр"
+        
+        search_term = raw_loc.lower()
+        
         for key in PLACES_CACHE:
-            if loc_name in key or key in loc_name:
+            k_low = key.lower()
+            # 1. Точное совпадение (ока == ока)
+            if k_low == search_term:
                 found_river = key
                 break
-        
+            # 2. Ключ внутри запроса ("можайское" в "можайское вдхр")
+            if k_low in search_term and len(k_low) > 3:
+                found_river = key
+                break
+            # 3. Запрос внутри ключа ("оке" - плохой пример, но "можайка" -> "можайское")
+            # Тут сложнее. Давайте надеяться на GPT, который должен вернуть именительный падеж.
+            # Если GPT вернул "Оке", а у нас "Ока" -> slice it
+            
+            # Эвристика: сравниваем первые 3 буквы, если слово короткое
+            if len(search_term) >= 3 and k_low.startswith(search_term[:3]):
+                 # "Оке" starts "Ока" (нет), но "Иваньковск" starts "Ива"
+                 # Для коротких слов (Ока, Дон) нужно точное совпадение или GPT должен дать "Ока"
+                 pass
+                 
+        # Если "в лоб" не нашли, пробуем хак для падежей (удаляем последнюю букву у запроса)
+        if not found_river and len(search_term) > 3:
+             sub = search_term[:-1] # "Дубн" из "Дубне"
+             for key in PLACES_CACHE:
+                 if sub in key.lower():
+                     found_river = key
+                     break
+
+        # Если все еще не нашли, но это Ока/Оке (GPT часто лажает с падежом для коротких слов)
+        if not found_river:
+             if "ок" in search_term and len(search_term) <= 4: found_river = "Ока"
+             if "дон" in search_term: found_river = "Дон"
+
         if found_river:
             locations = PLACES_CACHE[found_river].get("locations", [])
-            
-            # Строим клавиатуру с местами
             kb = InlineKeyboardBuilder()
-            # Берем топ-14 мест, чтобы не перегружать
             for loc in locations[:14]:
                 kb.button(text=loc, callback_data=f"loc:{found_river}:{loc}:{day_offset}")
             kb.adjust(2)
             
             await message.reply(
-                f"📍 **{found_river}**. Выберите популярное место (данные Русфишинга):",
+                f"📍 **{found_river}**. Выберите место (база Русфишинга):",
                 reply_markup=kb.as_markup(),
                 parse_mode="Markdown"
             )
             return
         
-        # Если реки нет в кэше — fallback на город (как раньше) или общий ответ
-        # Тут можно оставить логику "Если не нашел реку, считаем что это город"
-        weather = await get_weather_forecast(loc_name, day_offset)
+        # FALLBACK: Если реки нет в кэше — считаем это городом.
+        # ВАЖНО: Используем raw_loc (из GPT), но если он кривой ("на Оке"), OpenWeather ошибется.
+        # Лучше честно сказать, что не нашли в базе рек.
+        
+        weather = await get_weather_forecast(raw_loc, day_offset)
         if weather:
-             resp = await get_chat_response(message.from_user.id, query, weather, loc_name, "forecast")
+             resp = await get_chat_response(message.from_user.id, query, weather, raw_loc, "forecast")
              await safe_send_markdown(message, resp)
              return
+        else:
+             # Если погода не нашлась (или город кривой), пишем юзеру
+             await safe_send_markdown(message, f"⚠️ Не нашел водоем **{raw_loc}** в базе и погоду для него. Попробуйте уточнить название (например: *клев в Серпухове).")
+             return
 
-    # Общий ответ (болталка)
+    # Общий ответ
     resp = await get_chat_response(message.from_user.id, query, "", "", "general")
     await safe_send_markdown(message, resp)
+
 
 # =========================
 # BACKGROUND TASKS
@@ -339,6 +388,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
