@@ -1,0 +1,30 @@
+{
+  "Ока": {
+    "url": "https://www.rusfishing.ru/forum/forums/oka.146/",
+    "locations": ["Серпухов", "Кашира", "Коломна", "Пущино", "Рязань", "Муром", "Дзержинск", "Павлово", "Белоомут", "Таруса", "Озёры"]
+  },
+  "Москва-река": {
+    "url": "https://www.rusfishing.ru/forum/forums/moskva-reka.147/",
+    "locations": ["Чулково", "Бронницы", "Софьино", "Звенигород", "Жуковский", "Марьино", "Коломенское", "Мячково"]
+  },
+  "Волга": {
+    "url": "https://www.rusfishing.ru/forum/forums/volga.19/",
+    "locations": ["Тверь", "Дубна", "Углич", "Рыбинск", "Ярославль", "Кострома", "Нижний Новгород", "Казань", "Саратов", "Астрахань"]
+  },
+  "Пахра": {
+    "url": "https://www.rusfishing.ru/forum/threads/paxra.129/",
+    "locations": ["Подольск", "Ленинская", "Зеленая Слобода", "Ям", "Новленская плотина", "Володарского"]
+  },
+  "Можайское вдхр": {
+    "url": "https://www.rusfishing.ru/forum/forums/mozhajskoe-vdxr.55/",
+    "locations": ["Красновидово", "Горетово", "Троица", "Ильинское", "Мышкино"]
+  },
+  "Истринское вдхр": {
+    "url": "https://www.rusfishing.ru/forum/forums/istrinskoe-vdxr.52/",
+    "locations": ["Пятница", "Лопотово", "Трусово", "Якиманское"]
+  },
+  "Рузское вдхр": {
+    "url": "https://www.rusfishing.ru/forum/forums/ruzskoe-vdxr.54/",
+    "locations": ["Осташево", "Глазово", "Курово", "Щербинки"]
+  }
+}
