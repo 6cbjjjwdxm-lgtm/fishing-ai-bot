@@ -140,7 +140,7 @@ async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
 # =========================
 # AI LOGIC
 # =========================
-SYSTEM_PROMPT = """
+PROMPT_FORECAST = """
 Ты — ЭЛИТНЫЙ РЫБОЛОВНЫЙ ГИД (Стаж 30 лет).
 Дай прогноз, используя данные Русфишинга и погоду.
 
@@ -155,24 +155,71 @@ SYSTEM_PROMPT = """
 ---
 Ни хвоста, ни чешуи! 🎣
 """
+PROMPT_ADVICE = """
+Ты — ЭЛИТНЫЙ РЫБОЛОВНЫЙ ГИД с форума Русфишинг.
+Твоя задача — дать тактический совет.
+Используй сленг (бровка, свал, твич, джиг).
+Если указан водоем — учитывай его специфику (течение, глубины, прозрачность).
+Структура:
+1. Особенности места/рыбы
+2. Снасти и приманки (конкретные модели/цвета)
+3. Тактика поиска
+"""
 
-async def analyze_user_query(text: str) -> dict:
-    """Определяем намерение + выделяем название реки/водоема"""
-    system = "Извлеки intent (forecast/fish_search/general) и location_name (именительный падеж). JSON."
+async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str, intent: str, extra_context: str = "") -> str:
+    # Выбор промпта
+    system_text = PROMPT_FORECAST if intent == "forecast" else PROMPT_ADVICE
+    
+    # Формируем сообщение пользователя
+    user_content = f"ВОПРОС ПОЛЬЗОВАТЕЛЯ: {text}\n"
+    
+    if weather:
+        user_content += f"\n📊 ПОГОДА:\n{weather}\n"
+    
+    if extra_context:
+        user_content += f"\nℹ️ СПРАВКА ПО ВОДОЕМУ:\n{extra_context}\n"
+        
+    if intent == "forecast":
+        user_content += "\n(Дай прогноз строго по шаблону)"
+    else:
+        user_content += "\n(Дай экспертный совет, погоду расписывать не нужно, если она не критична)"
+
+    # Работа с историей сообщений
+    if user_id not in user_histories:
+        user_histories[user_id] = []
+    
+    # Всегда обновляем System Message на актуальный для текущей задачи
+    # Ищем, есть ли уже system message
+    sys_msg_idx = -1
+    for i, m in enumerate(user_histories[user_id]):
+        if m["role"] == "system":
+            sys_msg_idx = i
+            break
+            
+    if sys_msg_idx >= 0:
+        user_histories[user_id][sys_msg_idx] = {"role": "system", "content": system_text}
+    else:
+        user_histories[user_id].insert(0, {"role": "system", "content": system_text})
+
+    # Добавляем вопрос
+    user_histories[user_id].append({"role": "user", "content": user_content})
+    
+    # Чистка истории (оставляем System + последние 4-6 сообщений)
+    if len(user_histories[user_id]) > 8:
+        user_histories[user_id] = [user_histories[user_id][0]] + user_histories[user_id][-6:]
+
     try:
-        # Асинхронный вызов!
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": text},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0
+            messages=user_histories[user_id],
+            temperature=0.7
         )
-        return json.loads(response.choices[0].message.content)
-    except Exception:
-        return {"intent": "general"}
+        answer = response.choices[0].message.content
+        user_histories[user_id].append({"role": "assistant", "content": answer})
+        return answer
+    except Exception as e:
+        logging.error(f"AI Error: {e}")
+        return "⚠️ ИИ задумался. Попробуй еще раз."
 
 async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str, intent: str) -> str:
     if user_id not in user_histories:
@@ -245,93 +292,56 @@ async def cb_location_select(callback: CallbackQuery):
 async def main_handler(message: Message):
     text = message.caption or message.text
     query = text[1:].strip()
-    
     await message.bot.send_chat_action(message.chat.id, "typing")
 
-    day_offset = extract_day_offset(query)
-    
-    # 1. Анализ интента
     analysis = await analyze_user_query(query)
     intent = analysis.get("intent", "general")
-    # Принудительно чистим название от мусора
-    raw_loc = analysis.get("location_name", "").strip()
+    loc_name = analysis.get("location_name", "").strip() # "Пахра" или "Зеленая Слобода"
     
-    # 2. Логика поиска в кэше
+    # Пытаемся понять, о какой реке речь, чтобы добавить контекст
+    # (Даже если вопрос "как ловить", знание реки полезно)
+    river_context = ""
+    found_river_key = None
+    
+    # 1. Ищем реку в кэше по упоминанию (Пахра, Ока...)
+    for key in PLACES_CACHE:
+        if key.lower() in query.lower() or (loc_name and key.lower() in loc_name.lower()):
+            found_river_key = key
+            break
+            
+    # 2. Если нашли реку, формируем справку для ИИ
+    if found_river_key:
+        top_places = ", ".join(PLACES_CACHE[found_river_key].get("locations", [])[:5])
+        river_context = f"ВОДОЕМ: {found_river_key}. Популярные точки здесь: {top_places}. (Учитывай специфику этого водоема, если знаешь)."
+
+    # --- ВЕТКА: ПРОГНОЗ (FORECAST) ---
     if intent == "forecast":
-        found_river = None
-        
-        # Нормализация для поиска: "Оке" -> "ока", "Иваньковском" -> "иваньковск"
-        # Простой способ: перебор ключей кэша и проверка вхождения В НИХ (или ИХ в запрос)
-        
-        # Создаем мапу нормализованных ключей для поиска
-        # "ока": "Ока", "москва": "Москва-река", "можай": "Можайское вдхр"
-        
-        search_term = raw_loc.lower()
-        
-        for key in PLACES_CACHE:
-            k_low = key.lower()
-            # 1. Точное совпадение (ока == ока)
-            if k_low == search_term:
-                found_river = key
-                break
-            # 2. Ключ внутри запроса ("можайское" в "можайское вдхр")
-            if k_low in search_term and len(k_low) > 3:
-                found_river = key
-                break
-            # 3. Запрос внутри ключа ("оке" - плохой пример, но "можайка" -> "можайское")
-            # Тут сложнее. Давайте надеяться на GPT, который должен вернуть именительный падеж.
-            # Если GPT вернул "Оке", а у нас "Ока" -> slice it
-            
-            # Эвристика: сравниваем первые 3 буквы, если слово короткое
-            if len(search_term) >= 3 and k_low.startswith(search_term[:3]):
-                 # "Оке" starts "Ока" (нет), но "Иваньковск" starts "Ива"
-                 # Для коротких слов (Ока, Дон) нужно точное совпадение или GPT должен дать "Ока"
-                 pass
-                 
-        # Если "в лоб" не нашли, пробуем хак для падежей (удаляем последнюю букву у запроса)
-        if not found_river and len(search_term) > 3:
-             sub = search_term[:-1] # "Дубн" из "Дубне"
-             for key in PLACES_CACHE:
-                 if sub in key.lower():
-                     found_river = key
-                     break
+        # ... (тут старый код с кнопками, если нашли реку) ...
+        # ... (если не нашли - погода) ...
+        pass # (код кнопок пропустим для краткости, он у вас есть)
 
-        # Если все еще не нашли, но это Ока/Оке (GPT часто лажает с падежом для коротких слов)
-        if not found_river:
-             if "ок" in search_term and len(search_term) <= 4: found_river = "Ока"
-             if "дон" in search_term: found_river = "Дон"
-
-        if found_river:
-            locations = PLACES_CACHE[found_river].get("locations", [])
-            kb = InlineKeyboardBuilder()
-            for loc in locations[:14]:
-                kb.button(text=loc, callback_data=f"loc:{found_river}:{loc}:{day_offset}")
-            kb.adjust(2)
-            
-            await message.reply(
-                f"📍 **{found_river}**. Выберите место (база Русфишинга):",
-                reply_markup=kb.as_markup(),
-                parse_mode="Markdown"
-            )
-            return
+    # --- ВЕТКА: ВОПРОС КАК ЛОВИТЬ (FISH_SEARCH) ---
+    elif intent == "fish_search":
+        # Тут погода не обязательна, но контекст реки ВАЖЕН
+        # Если юзер спросил "Как ловить жереха в Зеленой Слободе", а мы знаем что это Пахра
+        # Мы скажем ИИ: "Речь про Пахру".
         
-        # FALLBACK: Если реки нет в кэше — считаем это городом.
-        # ВАЖНО: Используем raw_loc (из GPT), но если он кривой ("на Оке"), OpenWeather ошибется.
-        # Лучше честно сказать, что не нашли в базе рек.
-        
-        weather = await get_weather_forecast(raw_loc, day_offset)
-        if weather:
-             resp = await get_chat_response(message.from_user.id, query, weather, raw_loc, "forecast")
-             await safe_send_markdown(message, resp)
-             return
-        else:
-             # Если погода не нашлась (или город кривой), пишем юзеру
-             await safe_send_markdown(message, f"⚠️ Не нашел водоем **{raw_loc}** в базе и погоду для него. Попробуйте уточнить название (например: *клев в Серпухове).")
-             return
+        response = await get_chat_response(
+            message.from_user.id,
+            query, 
+            weather="", # Погоду не суем, если не просили
+            loc_name=loc_name,
+            intent="fish_search",
+            extra_context=river_context # Передаем найденный контекст
+        )
+        await safe_send_markdown(message, response)
+        return
 
-    # Общий ответ
-    resp = await get_chat_response(message.from_user.id, query, "", "", "general")
-    await safe_send_markdown(message, resp)
+    # --- ОБЩИЙ ВОПРОС ---
+    else:
+        resp = await get_chat_response(message.from_user.id, query, "", "", "general")
+        await safe_send_markdown(message, resp)
+
 
 
 # =========================
@@ -388,6 +398,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
