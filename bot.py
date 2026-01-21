@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import sys
-import time
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -17,9 +16,9 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ВАЖНО: Используем AsyncOpenAI
+# Используем AsyncOpenAI
 from openai import AsyncOpenAI
-import scraper  # Наш новый модуль
+import scraper  # Наш модуль парсера
 
 # =========================
 # CONFIG
@@ -34,12 +33,9 @@ if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
     sys.exit("❌ ОШИБКА: Не найдены токены в .env")
 
 dp = Dispatcher()
-# Асинхронный клиент OpenAI
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 user_histories: Dict[int, List[Dict]] = {}
-
-# Глобальный кэш мест (загружаем при старте)
 PLACES_CACHE = {}
 
 # =========================
@@ -72,13 +68,10 @@ def get_moon_phase() -> str:
     return phases[int(((days % 29.53) / 29.53) * 8) % 8]
 
 async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
-    # ... (начало функции) ...
+    if not OPENWEATHER_API_KEY or not city: return None
+    if day_offset > 2: day_offset = 2
 
-    # Список вариантов поиска (от точного к общему)
-    # 1. "Ям, Moscow Oblast, RU" (Самый точный для МО)
-    # 2. "Ям, RU" (По всей России)
-    # 3. "Ям" (Как есть)
-    
+    # Улучшенный поиск: пробуем с областью (для МО), потом с RU, потом просто название
     queries = [
         f"{city}, Moscow Oblast, RU", 
         f"{city}, RU", 
@@ -89,35 +82,30 @@ async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
     base_params = {"appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"}
 
     timeout = aiohttp.ClientTimeout(total=5)
+    data = None
     
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        data = None
-        # Пробуем варианты по очереди
         for q in queries:
             params = base_params.copy()
             params["q"] = q
             try:
                 async with session.get(url, params=params) as r:
                     if r.status == 200:
-                        data = await r.json()
-                        # Если нашли - отлично, выходим из цикла
-                        if data.get("cod") == "200":
+                        json_data = await r.json()
+                        if json_data.get("cod") == "200":
+                            data = json_data
                             break
             except Exception:
                 continue
-        
-        if not data: return None
-
-    # ... (дальше парсинг JSON как обычно) ...
+    
+    if not data: return None
 
     target_date = datetime.date.today() + datetime.timedelta(days=day_offset)
     target_str = target_date.strftime("%Y-%m-%d")
     forecasts = data.get("list", [])
     
-    # Ищем прогноз на 12:00 нужного дня
     day_data = [f for f in forecasts if target_str in f.get("dt_txt", "")]
     if not day_data: 
-        # Если нет конкретного дня, берем ближайший
         if not forecasts: return None
         best = forecasts[0]
     else:
@@ -155,6 +143,7 @@ PROMPT_FORECAST = """
 ---
 Ни хвоста, ни чешуи! 🎣
 """
+
 PROMPT_ADVICE = """
 Ты — ЭЛИТНЫЙ РЫБОЛОВНЫЙ ГИД с форума Русфишинг.
 Твоя задача — дать тактический совет.
@@ -165,6 +154,31 @@ PROMPT_ADVICE = """
 2. Снасти и приманки (конкретные модели/цвета)
 3. Тактика поиска
 """
+
+async def analyze_user_query(text: str) -> dict:
+    """Определяем намерение + выделяем название реки/водоема"""
+    system = """
+Ты — классификатор запросов.
+1. "forecast" — вопросы про КЛЕВ на конкретную дату/время ("клюет ли завтра", "прогноз на выходные", "клев на Оке").
+2. "fish_search" — вопросы КАК/ГДЕ ловить, тактика, снасти ("как ловить жереха", "на что берет щука", "где искать судака").
+3. "general" — остальное.
+
+Верни JSON: {"intent": "...", "location_name": "..."}
+"""
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": text},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        logging.error(f"Analysis Error: {e}")
+        return {"intent": "general"}
 
 async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str, intent: str, extra_context: str = "") -> str:
     # Выбор промпта
@@ -188,8 +202,7 @@ async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str
     if user_id not in user_histories:
         user_histories[user_id] = []
     
-    # Всегда обновляем System Message на актуальный для текущей задачи
-    # Ищем, есть ли уже system message
+    # Всегда обновляем System Message на актуальный
     sys_msg_idx = -1
     for i, m in enumerate(user_histories[user_id]):
         if m["role"] == "system":
@@ -201,10 +214,8 @@ async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str
     else:
         user_histories[user_id].insert(0, {"role": "system", "content": system_text})
 
-    # Добавляем вопрос
     user_histories[user_id].append({"role": "user", "content": user_content})
     
-    # Чистка истории (оставляем System + последние 4-6 сообщений)
     if len(user_histories[user_id]) > 8:
         user_histories[user_id] = [user_histories[user_id][0]] + user_histories[user_id][-6:]
 
@@ -221,59 +232,31 @@ async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str
         logging.error(f"AI Error: {e}")
         return "⚠️ ИИ задумался. Попробуй еще раз."
 
-async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str, intent: str) -> str:
-    if user_id not in user_histories:
-        user_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-    user_prompt = f"ЗАПРОС: {text}\nПОГОДА: {weather}\n"
-    
-    # Добавляем контекст диалога
-    history = user_histories[user_id]
-    history.append({"role": "user", "content": user_prompt})
-    
-    # Ограничиваем историю
-    if len(history) > 8:
-        history = [history[0]] + history[-6:]
-
-    try:
-        # Асинхронный вызов!
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=history,
-            temperature=0.7
-        )
-        answer = response.choices[0].message.content
-        history.append({"role": "assistant", "content": answer})
-        user_histories[user_id] = history
-        return answer
-    except Exception as e:
-        logging.error(f"AI Error: {e}")
-        return "⚠️ ИИ задумался и не ответил. Попробуй еще раз."
 
 # =========================
 # HANDLERS
 # =========================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("👋 Привет! Я использую базу Русфишинга.\nНапиши: `*клев на Оке` или `*клев на Можайке`")
+    await message.answer("👋 Привет! Я использую базу Русфишинга.\nНапиши: `*клев на Оке` или `*как ловить щуку на Пахре`")
 
 @dp.callback_query(F.data.startswith("loc:"))
 async def cb_location_select(callback: CallbackQuery):
     # data: loc:RiverName:PlaceName:DayOffset
     try:
         await callback.answer()
-        _, river, place, day_s = callback.data.split(":")
+        parts = callback.data.split(":")
+        # Защита от старых коллбеков разной длины
+        if len(parts) < 4: return
+        
+        _, river, place, day_s = parts
         day = int(day_s)
         
         await safe_edit_markdown(callback.message, f"✅ Выбрано: {place} ({river}). Анализирую...")
 
-        # Параллельно запускаем погоду и подготовку промпта
         weather_task = asyncio.create_task(get_weather_forecast(place, day))
-        # Здесь в будущем можно добавить asyncio.create_task(scraper.get_forum_context(...))
-        
         weather = await weather_task or f"⚠️ Погода для {place} не найдена."
         
-        # Генерируем ответ
         response = await get_chat_response(
             callback.from_user.id,
             f"Клев на {river} в районе {place}",
@@ -281,7 +264,6 @@ async def cb_location_select(callback: CallbackQuery):
             river,
             "forecast"
         )
-        
         await safe_send_markdown(callback.message, response)
         
     except Exception as e:
@@ -294,64 +276,76 @@ async def main_handler(message: Message):
     query = text[1:].strip()
     await message.bot.send_chat_action(message.chat.id, "typing")
 
+    day_offset = extract_day_offset(query)
+    
+    # 1. Анализ интента
     analysis = await analyze_user_query(query)
     intent = analysis.get("intent", "general")
-    loc_name = analysis.get("location_name", "").strip() # "Пахра" или "Зеленая Слобода"
+    loc_name = analysis.get("location_name", "").strip()
     
-    # Пытаемся понять, о какой реке речь, чтобы добавить контекст
-    # (Даже если вопрос "как ловить", знание реки полезно)
+    # 2. Поиск контекста реки
     river_context = ""
     found_river_key = None
     
-    # 1. Ищем реку в кэше по упоминанию (Пахра, Ока...)
+    # Улучшенный поиск: ищем вхождение ключа (Ока) в запрос (Оке) или наоборот
     for key in PLACES_CACHE:
+        # Если "ока" в "на оке" ИЛИ "можай" в "можайка"
         if key.lower() in query.lower() or (loc_name and key.lower() in loc_name.lower()):
             found_river_key = key
             break
             
-    # 2. Если нашли реку, формируем справку для ИИ
     if found_river_key:
         top_places = ", ".join(PLACES_CACHE[found_river_key].get("locations", [])[:5])
-        river_context = f"ВОДОЕМ: {found_river_key}. Популярные точки здесь: {top_places}. (Учитывай специфику этого водоема, если знаешь)."
+        river_context = f"ВОДОЕМ: {found_river_key}. Популярные точки: {top_places}."
 
-    # --- ВЕТКА: ПРОГНОЗ (FORECAST) ---
+    # ВЕТКА: ПРОГНОЗ
     if intent == "forecast":
-        # ... (тут старый код с кнопками, если нашли реку) ...
-        # ... (если не нашли - погода) ...
-        pass # (код кнопок пропустим для краткости, он у вас есть)
-
-    # --- ВЕТКА: ВОПРОС КАК ЛОВИТЬ (FISH_SEARCH) ---
-    elif intent == "fish_search":
-        # Тут погода не обязательна, но контекст реки ВАЖЕН
-        # Если юзер спросил "Как ловить жереха в Зеленой Слободе", а мы знаем что это Пахра
-        # Мы скажем ИИ: "Речь про Пахру".
+        # Если нашли реку -> даем кнопки
+        if found_river_key:
+            locations = PLACES_CACHE[found_river_key].get("locations", [])
+            kb = InlineKeyboardBuilder()
+            for loc in locations[:14]:
+                kb.button(text=loc, callback_data=f"loc:{found_river_key}:{loc}:{day_offset}")
+            kb.adjust(2)
+            
+            await message.reply(
+                f"📍 **{found_river_key}**. Выберите место (база Русфишинга):",
+                reply_markup=kb.as_markup(),
+                parse_mode="Markdown"
+            )
+            return
         
+        # Если реки нет в базе - просто прогноз по городу
+        weather = await get_weather_forecast(loc_name, day_offset)
+        resp = await get_chat_response(message.from_user.id, query, weather, loc_name, "forecast")
+        await safe_send_markdown(message, resp)
+        return
+
+    # ВЕТКА: ВОПРОС КАК ЛОВИТЬ
+    elif intent == "fish_search":
         response = await get_chat_response(
             message.from_user.id,
             query, 
-            weather="", # Погоду не суем, если не просили
+            weather="", 
             loc_name=loc_name,
             intent="fish_search",
-            extra_context=river_context # Передаем найденный контекст
+            extra_context=river_context
         )
         await safe_send_markdown(message, response)
         return
 
-    # --- ОБЩИЙ ВОПРОС ---
+    # ОБЩИЙ ВОПРОС
     else:
         resp = await get_chat_response(message.from_user.id, query, "", "", "general")
         await safe_send_markdown(message, resp)
-
 
 
 # =========================
 # BACKGROUND TASKS
 # =========================
 async def periodic_cache_update():
-    """Обновляем базу каждые 24 часа"""
     global PLACES_CACHE
     while True:
-        # Обновляем раз в сутки
         await asyncio.sleep(24 * 3600) 
         try:
             logging.info("⏳ Фоновое обновление базы...")
@@ -375,15 +369,12 @@ async def start_web_server():
 # =========================
 async def main():
     global PLACES_CACHE
-    
-    # 1. Загружаем кэш сразу
     PLACES_CACHE = scraper.load_cache()
     logging.info(f"Loaded {len(PLACES_CACHE)} rivers from cache.")
 
     bot = Bot(token=TELEGRAM_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # 2. Запускаем фоновые задачи
     asyncio.create_task(start_web_server())
     asyncio.create_task(periodic_cache_update())
 
@@ -398,6 +389,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
