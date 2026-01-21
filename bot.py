@@ -75,15 +75,28 @@ async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
     if not OPENWEATHER_API_KEY or not city: return None
     if day_offset > 2: day_offset = 2
 
+    # ВАЖНО: Добавляем страну RU, чтобы не искать Oke в Нигерии
+    # Если город уже содержит запятую (напр "Москва, RU"), не дублируем
+    q_param = city if "," in city else f"{city},RU"
+
     url = "https://api.openweathermap.org/data/2.5/forecast"
-    params = {"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"}
+    params = {"q": q_param, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"}
 
     try:
-        timeout = aiohttp.ClientTimeout(total=5) # Быстрый таймаут
+        timeout = aiohttp.ClientTimeout(total=5)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params) as r:
-                if r.status != 200: return None
-                data = await r.json()
+                if r.status != 200:
+                    # Попытка №2 без RU (для редких случаев)
+                    if "RU" in q_param:
+                        params["q"] = city
+                        async with session.get(url, params=params) as r2:
+                            if r2.status != 200: return None
+                            data = await r2.json()
+                    else:
+                        return None
+                else:
+                    data = await r.json()
     except Exception:
         return None
 
@@ -326,6 +339,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
