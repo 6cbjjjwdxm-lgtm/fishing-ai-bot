@@ -17,7 +17,8 @@ RIVER_URLS = {
     "Иваньковское вдхр": "https://www.rusfishing.ru/forum/forums/ivankovskoe-vdxr.53/",
     "Рузуское вдхр": "https://www.rusfishing.ru/forum/forums/ruzskoe-vdxr.54/",
     "Яузское вдхр": "https://www.rusfishing.ru/forum/forums/jauzskoe-vdxr.56/",
-    "Можайское вдхр": "https://www.rusfishing.ru/forum/forums/mozhajskoe-vdxr.55/"
+    "Можайское вдхр": "https://www.rusfishing.ru/forum/forums/mozhajskoe-vdxr.55/",
+    "Истринское вдхр": "https://www.rusfishing.ru/forum/forums/istrinskoye-vodokhranilishche.69/",
 }
 
 headers = {
@@ -26,9 +27,13 @@ headers = {
 
 async def fetch_forum_page(session, url):
     try:
-        async with session.get(url, headers=headers) as resp:
+        async with session.get(url, headers=headers, allow_redirects=True) as resp:
             if resp.status == 200:
                 return await resp.text()
+            if resp.status in (403, 429):
+                logging.warning(f"Rusfishing blocked/limited {resp.status} for {url}")
+                return None
+            logging.warning(f"Rusfishing HTTP {resp.status} for {url}")
     except Exception as e:
         logging.error(f"Ошибка парсинга {url}: {e}")
     return None
@@ -123,6 +128,7 @@ WATERBODY_ALIASES = {
     "можайское": "Можайское вдхр",
     "истра": "Истринское вдхр",
     "истринское": "Истринское вдхр",
+    "истринское вдхр": "Истринское вдхр",
     "руза": "Рузуское вдхр",
     "рузское": "Рузуское вдхр",
     "иванька": "Иваньковское вдхр",
@@ -137,23 +143,19 @@ def normalize_text(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
 def find_forum_url_for_waterbody(user_text: str, cache: dict) -> str | None:
-    """
-    Пытаемся сопоставить "Можайка/Истра" -> ключ RIVER_URLS/places_cache.
-    1) по алиасам
-    2) по вхождению ключа cache в запрос
-    """
     t = normalize_text(user_text)
 
     for k, canonical in WATERBODY_ALIASES.items():
-        if k in t and canonical in cache and cache[canonical].get("url"):
-            return cache[canonical]["url"]
+        if k in t:
+            if canonical in cache and cache[canonical].get("url"):
+                return cache[canonical]["url"]
+            if canonical in RIVER_URLS:
+                return RIVER_URLS[canonical]
 
-    # fallback: прямое вхождение ключа кэша в текст
     for river in cache.keys():
         if normalize_text(river) in t and cache[river].get("url"):
             return cache[river]["url"]
 
-    # fallback: по RIVER_URLS (если кэш пустой)
     for river, url in RIVER_URLS.items():
         if normalize_text(river) in t:
             return url
@@ -194,7 +196,7 @@ async def search_threads_in_forum(session, forum_url: str, query_words: list[str
     results = []
 
     for p in range(1, pages + 1):
-        url = forum_url if p == 1 else forum_url.rstrip("/") + f"page-{p}"
+        url = thread_url if p == 1 else thread_url.rstrip("/") + f"/page-{p}/"
         html = await fetch_forum_page(session, url)
         if not html:
             continue
@@ -319,7 +321,7 @@ async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
     query_words = fish_keys if fish_keys else ["где", "стоит", "точки", "ям", "бровк", "залив"]
 
     timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+async with aiohttp.ClientSession(timeout=timeout) as session:
         threads = await search_threads_in_forum(session, forum_url, query_words, pages=2)
         if not threads:
             return ""
