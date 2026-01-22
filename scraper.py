@@ -104,19 +104,26 @@ FISH_ALIASES = {
 }
 
 WATERBODY_ALIASES = {
-    "можайка": "Можайское вдхр",
     "можайское": "Можайское вдхр",
+    "можайском": "Можайское вдхр",
+    "можайка": "Можайское вдхр",
+    "можайское вдхр": "Можайское вдхр",
     "истра": "Истринское вдхр",
-    "истринское": "Истринское вдхр",
+    "истринском": "Истринское вдхр",
     "истринское вдхр": "Истринское вдхр",
     "руза": "Рузуское вдхр",
     "рузское": "Рузуское вдхр",
+    "рузском": "Рузуское вдхр",
     "иванька": "Иваньковское вдхр",
     "иваньковское": "Иваньковское вдхр",
+    "иваньковском": "Иваньковское вдхр",
     "яуза": "Яузское вдхр",
     "ока": "Ока",
+    "оке": "Ока"
     "москва-река": "Москва-река",
-    "москва река": "Москва-река",
+    "москварека": "Москва-река",
+    "москве-реке": "Москва-река",
+    "москве реке": "Москва-река",
 }
 
 def normalize_text(s: str) -> str:
@@ -125,17 +132,31 @@ def normalize_text(s: str) -> str:
 def find_forum_url_for_waterbody(user_text: str, cache: dict) -> str | None:
     t = normalize_text(user_text)
 
+    # Мини-нормализация падежей/форм (самое частое)
+    t = re.sub(r"\bоке\b", "ока", t)
+    t = re.sub(r"\bможайском\b", "можайское", t)
+    t = re.sub(r"\bводохранилище\b", "вдхр", t)
+
+    logging.warning("RF_FIND t=%s", t)
+    logging.warning("RF_FIND cache_keys=%s", list(cache.keys())[:30])
+
+    # 1) Сначала алиасы (они должны покрывать 90% кейсов)
     for k, canonical in WATERBODY_ALIASES.items():
         if k in t:
-            if canonical in cache and cache[canonical].get("url"):
+            # сначала пробуем cache (если он заполнен)
+            if canonical in cache and isinstance(cache[canonical], dict) and cache[canonical].get("url"):
                 return cache[canonical]["url"]
+            # потом прямой маппинг
             if canonical in RIVER_URLS:
                 return RIVER_URLS[canonical]
 
+    # 2) Потом прямое вхождение ключей cache в текст
     for river in cache.keys():
-        if normalize_text(river) in t and cache[river].get("url"):
-            return cache[river]["url"]
+        if normalize_text(river) in t:
+            if isinstance(cache[river], dict) and cache[river].get("url"):
+                return cache[river]["url"]
 
+    # 3) Потом прямое вхождение ключей RIVER_URLS в текст
     for river, url in RIVER_URLS.items():
         if normalize_text(river) in t:
             return url
