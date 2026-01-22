@@ -28,12 +28,13 @@ headers = {
 async def fetch_forum_page(session, url):
     try:
         async with session.get(url, headers=headers, allow_redirects=True) as resp:
-            if resp.status == 200:
-                return await resp.text()
-            if resp.status in (403, 429):
-                logging.warning(f"Rusfishing blocked/limited {resp.status} for {url}")
-                return None
-            logging.warning(f"Rusfishing HTTP {resp.status} for {url}")
+            txt = await resp.text(errors="ignore")
+            logging.warning("RF HTTP %s %s", resp.status, url)
+            # покажем первые символы — сразу увидишь "enable cookies / javascript" или капчу
+            logging.warning("RF BODY_HEAD %s", (txt or "")[:200].replace("\n", " "))
+            if resp.status == 200 and txt:
+                return txt
+            return None
     except Exception as e:
         logging.error(f"Ошибка парсинга {url}: {e}")
     return None
