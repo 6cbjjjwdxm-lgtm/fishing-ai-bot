@@ -344,6 +344,18 @@ async def main_handler(message: Message):
         try:
             forum_context = await scraper.get_rusfishing_context(query, PLACES_CACHE)
         except Exception as e:
+        try:
+            import aiohttp
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                test_url = "https://www.rusfishing.ru/forum/forums/oka.146/"
+                async with s.get(test_url, headers=scraper.headers, allow_redirects=True) as r:
+                    txt = await r.text(errors="ignore")
+                    logging.warning("RF_TEST status=%s len=%s", r.status, len(txt))
+                    logging.warning("RF_TEST head=%s", txt[:200].replace("\n", " "))
+        except Exception as e:
+            logging.exception("RF_TEST failed")
+    
             logging.exception("Rusfishing context error")  # покажет stacktrace
             forum_context = ""
 
@@ -428,6 +440,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
