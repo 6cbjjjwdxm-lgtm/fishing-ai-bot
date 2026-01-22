@@ -271,7 +271,16 @@ def extract_fish_keywords(user_text: str) -> list[str]:
 async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
     forum_url = find_forum_url_for_waterbody(user_query, places_cache)
     if not forum_url:
+        logging.warning("RF_CTX no_forum_url query=%s", user_query)
         return ""
+
+    logging.warning("RF_CTX forum_url=%s query=%s", forum_url, user_query)
+
+    ...
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        threads = await search_threads_in_forum(session, forum_url, query_words, pages=2)
+        logging.warning("RF_CTX threads_found=%s", len(threads))
+        ...
 
     fish_keys = extract_fish_keywords(user_query)
     query_words = fish_keys if fish_keys else ["где", "стоит", "точки", "ям", "бровк", "залив"]
