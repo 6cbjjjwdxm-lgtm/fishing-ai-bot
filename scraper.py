@@ -297,22 +297,19 @@ async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
 
     logging.warning("RF_CTX forum_url=%s query=%s", forum_url, user_query)
 
-    ...
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        threads = await search_threads_in_forum(session, forum_url, query_words, pages=2)
-        logging.warning("RF_CTX threads_found=%s", len(threads))
-        ...
-
     fish_keys = extract_fish_keywords(user_query)
     query_words = fish_keys if fish_keys else ["где", "стоит", "точки", "ям", "бровк", "залив"]
 
+    # FIX: timeout должен быть определён всегда
     timeout = aiohttp.ClientTimeout(total=12)
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
         threads = await search_threads_in_forum(session, forum_url, query_words, pages=2)
+        logging.warning("RF_CTX threads_found=%s", len(threads))
 
-        # FIX: fallback если по заголовкам ничего не нашли
         if not threads:
             threads = await get_top_threads_in_forum(session, forum_url, limit=5)
+            logging.warning("RF_CTX fallback_threads_found=%s", len(threads))
 
         if not threads:
             return ""
@@ -341,4 +338,5 @@ async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
             + "\n\nССЫЛКИ ДЛЯ ПРОВЕРКИ:\n"
             + "\n".join(f"- {u}" for u in source_links)
         )
+
 
