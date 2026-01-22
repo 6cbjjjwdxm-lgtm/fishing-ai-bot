@@ -12,7 +12,9 @@ CACHE_FILE = "places_cache.json"
 # ID форумов Русфишинга: Ока=146, Москва-река=147 (примерные ID, лучше брать полные ссылки)
 # Для простоты начнем с маппинга, который будем пополнять
 RIVER_URLS = {
-    "Ока": "https://www.rusfishing.ru/forum/forums/oka.146/",
+    "Ока": "https://www.rusfishing.ru/forum/forums/reka-oka.73/",
+    "Река Ока": "https://www.rusfishing.ru/forum/forums/reka-oka.73/",
+    "на оке": "https://www.rusfishing.ru/forum/forums/reka-oka.73/",
     "Москва-река": "https://www.rusfishing.ru/forum/forums/moskva-reka.147/",
     "Иваньковское вдхр": "https://www.rusfishing.ru/forum/forums/ivankovskoe-vdxr.53/",
     "Рузуское вдхр": "https://www.rusfishing.ru/forum/forums/ruzskoe-vdxr.54/",
