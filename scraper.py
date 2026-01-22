@@ -321,7 +321,7 @@ async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
     query_words = fish_keys if fish_keys else ["где", "стоит", "точки", "ям", "бровк", "залив"]
 
     timeout = aiohttp.ClientTimeout(total=10)
-async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         threads = await search_threads_in_forum(session, forum_url, query_words, pages=2)
         if not threads:
             return ""
