@@ -4,17 +4,16 @@ import logging
 import json
 import re
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
-# Файл, куда сохраняем базу
+# =========================
+# CACHE
+# =========================
 CACHE_FILE = "places_cache.json"
 
-# Ссылка на карты разделов (можно расширять)
-# ID форумов Русфишинга: Ока=146, Москва-река=147 (примерные ID, лучше брать полные ссылки)
-# Для простоты начнем с маппинга, который будем пополнять
 RIVER_URLS = {
     "Ока": "https://www.rusfishing.ru/forum/forums/reka-oka.73/",
     "Река Ока": "https://www.rusfishing.ru/forum/forums/reka-oka.73/",
-    "на оке": "https://www.rusfishing.ru/forum/forums/reka-oka.73/",
     "Москва-река": "https://www.rusfishing.ru/forum/forums/moskva-reka.147/",
     "Иваньковское вдхр": "https://www.rusfishing.ru/forum/forums/ivankovskoe-vdxr.53/",
     "Рузуское вдхр": "https://www.rusfishing.ru/forum/forums/ruzskoe-vdxr.54/",
@@ -27,91 +26,70 @@ headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
 
-async def fetch_forum_page(session, url):
+async def fetch_forum_page(session, url: str) -> str | None:
     try:
         async with session.get(url, headers=headers, allow_redirects=True) as resp:
             txt = await resp.text(errors="ignore")
             logging.warning("RF HTTP %s %s", resp.status, url)
-            # покажем первые символы — сразу увидишь "enable cookies / javascript" или капчу
             logging.warning("RF BODY_HEAD %s", (txt or "")[:200].replace("\n", " "))
             if resp.status == 200 and txt:
                 return txt
             return None
-    except Exception as e:
-        logging.error(f"Ошибка парсинга {url}: {e}")
-    return None
+    except Exception:
+        logging.exception("Ошибка парсинга %s", url)
+        return None
 
-def extract_locations_from_html(html, river_name):
+def extract_locations_from_html(html: str, river_name: str):
     soup = BeautifulSoup(html, "lxml")
     locations = set()
-    
-    # Ищем заголовки тем (обычно в div.structItem-title a)
+
     threads = soup.select(".structItem-title a")
-    
     for thread in threads:
         text = thread.get_text(strip=True)
-        # Убираем лишнее, оставляем суть.
-        # Часто пишут "Ока в районе Каширы" -> "Кашира"
-        # Или просто "Ступино"
-        
-        # Простая эвристика: если название темы короткое (< 4 слов), берем целиком
-        # Если длинное, пытаемся найти слова с большой буквы, исключая предлоги
-        
-        # Очистка от слов-паразитов
-        clean_name = re.sub(r'\(.*?\)', '', text) # убрать скобки
-        clean_name = clean_name.replace(river_name, "").strip() # убрать название реки
-        
-        if len(clean_name) > 2 and len(clean_name) < 40:
-             locations.add(clean_name.strip(" .,-"))
+        clean_name = re.sub(r"\(.*?\)", "", text)
+        clean_name = clean_name.replace(river_name, "").strip()
+
+        if 2 < len(clean_name) < 40:
+            locations.add(clean_name.strip(" .,-"))
 
     return sorted(list(locations))
 
 async def update_rusfishing_cache():
-    """Главная функция обновления базы"""
     logging.info("🎣 Запуск обновления базы Русфишинга...")
-    
-    # 1. Загружаем текущий кэш
+
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             cache = json.load(f)
     except FileNotFoundError:
         cache = {}
 
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         for river, url in RIVER_URLS.items():
-            logging.info(f"Парсим: {river}...")
+            logging.info("Парсим: %s ...", river)
             html = await fetch_forum_page(session, url)
             if html:
                 locs = extract_locations_from_html(html, river)
                 if locs:
-                    # Сохраняем url и список мест
-                    cache[river] = {
-                        "url": url,
-                        "locations": locs
-                    }
-            
-            # Вежливая пауза
-            await asyncio.sleep(2)
+                    cache[river] = {"url": url, "locations": locs}
+            await asyncio.sleep(1)
 
-    # 2. Сохраняем обновленный кэш
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
-    
-    logging.info(f"✅ База мест обновлена! Всего рек: {len(cache)}")
+
+    logging.info("✅ База мест обновлена! Всего рек: %s", len(cache))
     return cache
 
 def load_cache():
-    """Синхронная загрузка для старта"""
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
-# =========================
-# RUSFISHING "RAG" LAYER (snippets + links)
-# =========================
 
-from urllib.parse import urljoin
+# =========================
+# RUSFISHING "RAG" LAYER
+# =========================
 
 STOP_TITLE_WORDS = {
     "отчёт", "отчет", "отчеты", "отчёты", "вопрос", "вопросы", "помогите",
@@ -126,7 +104,6 @@ FISH_ALIASES = {
 }
 
 WATERBODY_ALIASES = {
-    # можно расширять по мере запросов
     "можайка": "Можайское вдхр",
     "можайское": "Можайское вдхр",
     "истра": "Истринское вдхр",
@@ -166,9 +143,6 @@ def find_forum_url_for_waterbody(user_text: str, cache: dict) -> str | None:
     return None
 
 def extract_thread_links_from_forum_html(html: str) -> list[dict]:
-    """
-    Возвращает список {title, url}
-    """
     soup = BeautifulSoup(html, "lxml")
     out = []
     for a in soup.select(".structItem-title a"):
@@ -184,41 +158,49 @@ def looks_like_good_thread_title(title: str) -> bool:
     t = normalize_text(title)
     if len(t) < 3:
         return False
-    # убираем мусор по стоп-словам
     for w in STOP_TITLE_WORDS:
         if w in t:
             return False
     return True
 
+async def get_top_threads_in_forum(session, forum_url: str, limit: int = 6) -> list[dict]:
+    html = await fetch_forum_page(session, forum_url)
+    if not html:
+        return []
+    threads = extract_thread_links_from_forum_html(html)
+    out = []
+    for th in threads:
+        if looks_like_good_thread_title(th["title"]):
+            out.append(th)
+        if len(out) >= limit:
+            break
+    return out
+
 async def search_threads_in_forum(session, forum_url: str, query_words: list[str], pages: int = 2) -> list[dict]:
-    """
-    Ищем релевантные темы по заголовкам в пределах N страниц раздела.
-    Возвращает top threads: [{title,url}, ...]
-    """
     query_words = [normalize_text(w) for w in query_words if w]
     results = []
 
     for p in range(1, pages + 1):
-        url = thread_url if p == 1 else thread_url.rstrip("/") + f"/page-{p}/"
+        # FIX: тут должен быть forum_url, а не thread_url
+        url = forum_url if p == 1 else forum_url.rstrip("/") + f"/page-{p}/"
         html = await fetch_forum_page(session, url)
         if not html:
             continue
-        threads = extract_thread_links_from_forum_html(html)
 
+        threads = extract_thread_links_from_forum_html(html)
         for th in threads:
             title = th["title"]
             if not looks_like_good_thread_title(title):
                 continue
             title_norm = normalize_text(title)
-            # простое ранжирование: сколько слов запроса встретилось в заголовке
             score = sum(1 for w in query_words if w and w in title_norm)
             if score > 0:
                 results.append({**th, "score": score})
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.6)
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    # уникализируем по url
+
     seen = set()
     uniq = []
     for r in results:
@@ -229,73 +211,52 @@ async def search_threads_in_forum(session, forum_url: str, query_words: list[str
     return uniq[:6]
 
 def extract_posts_from_thread_html(html: str, limit: int = 10) -> list[dict]:
-    """
-    XenForo: сообщения обычно в article.message (или div.message)
-    Вытаскиваем: text snippet + permalink (на конкретный пост, если есть) + date (если есть).
-    """
     soup = BeautifulSoup(html, "lxml")
     posts = []
 
-    # наиболее типичные контейнеры XenForo
     items = soup.select("article.message")
     if not items:
         items = soup.select(".message")
 
     for it in items[:limit]:
-        # permalink (обычно a.u-concealed или a[href*='#post-'])
         a = it.select_one("a[href*='#post-'], a.u-concealed[href]")
-        permalink = None
-        if a and a.get("href"):
-            permalink = urljoin("https://www.rusfishing.ru", a.get("href"))
+        permalink = urljoin("https://www.rusfishing.ru", a.get("href")) if a and a.get("href") else None
 
-        # текст поста
         body = it.select_one(".message-body") or it.select_one(".bbWrapper") or it
         text = body.get_text(" ", strip=True)
         text = re.sub(r"\s+", " ", text).strip()
 
-        # режем до 240-320 символов, чтобы не тащить простыни
         if len(text) > 320:
             text = text[:320].rsplit(" ", 1)[0] + "…"
-
         if len(text) < 40:
             continue
 
-        # дата (не всегда доступна без доп. селекторов)
         time_el = it.select_one("time")
         date_str = time_el.get("datetime") if time_el else ""
 
-        posts.append({
-            "snippet": text,
-            "url": permalink,
-            "date": date_str
-        })
+        posts.append({"snippet": text, "url": permalink, "date": date_str})
 
-    # фильтруем посты без ссылки (если не нашли якорь — всё равно можно ссылать на тему)
     return posts
 
 async def fetch_thread_post_snippets(session, thread_url: str, max_pages: int = 2) -> list[dict]:
-    """
-    Берём 1–2 страницы темы (обычно последние важнее, но тут упрощённо).
-    Для улучшения можно потом искать last page, но это уже усложнение.
-    """
     all_posts = []
     for p in range(1, max_pages + 1):
-        url = thread_url if p == 1 else thread_url.rstrip("/") + f"page-{p}"
+        # FIX: нужна форма /page-2/
+        url = thread_url if p == 1 else thread_url.rstrip("/") + f"/page-{p}/"
         html = await fetch_forum_page(session, url)
         if not html:
             continue
         all_posts.extend(extract_posts_from_thread_html(html, limit=12))
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.6)
 
-    # уникализируем по snippet/url
     seen = set()
     uniq = []
-    for p in all_posts:
-        key = (p.get("url") or "", p["snippet"][:80])
+    for it in all_posts:
+        key = (it.get("url") or "", it["snippet"][:80])
         if key in seen:
             continue
         seen.add(key)
-        uniq.append(p)
+        uniq.append(it)
     return uniq[:12]
 
 def extract_fish_keywords(user_text: str) -> list[str]:
@@ -305,27 +266,24 @@ def extract_fish_keywords(user_text: str) -> list[str]:
         if any(a in t for a in arr):
             keys.append(fish)
             keys.extend(arr[:2])
-    return list(dict.fromkeys(keys))  # uniq preserve order
+    return list(dict.fromkeys(keys))
 
 async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
-    """
-    Главная функция для bot.py:
-    - находим форум-раздел водоема
-    - находим 2–4 релевантных темы
-    - вытаскиваем сниппеты + ссылки
-    - возвращаем короткий контекст для LLM
-    """
     forum_url = find_forum_url_for_waterbody(user_query, places_cache)
     if not forum_url:
         return ""
 
     fish_keys = extract_fish_keywords(user_query)
-    # если рыбу не распознали — всё равно попробуем по общим словам
     query_words = fish_keys if fish_keys else ["где", "стоит", "точки", "ям", "бровк", "залив"]
 
-    timeout = aiohttp.ClientTimeout(total=10)
+    timeout = aiohttp.ClientTimeout(total=12)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         threads = await search_threads_in_forum(session, forum_url, query_words, pages=2)
+
+        # FIX: fallback если по заголовкам ничего не нашли
+        if not threads:
+            threads = await get_top_threads_in_forum(session, forum_url, limit=5)
+
         if not threads:
             return ""
 
@@ -335,15 +293,15 @@ async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
 
         for th in picked:
             posts = await fetch_thread_post_snippets(session, th["url"], max_pages=1)
-            # если нет пермалинков — хотя бы ссылка на тему
+
             if th["url"] not in source_links:
                 source_links.append(th["url"])
+
             for p in posts[:4]:
                 if p.get("url"):
                     source_links.append(p["url"])
                 snippets.append(f"- {p['snippet']} ({p.get('url') or th['url']})")
 
-        # ограничим, чтобы не “тащить подчистую”
         snippets = snippets[:10]
         source_links = list(dict.fromkeys(source_links))[:6]
 
@@ -353,3 +311,4 @@ async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
             + "\n\nССЫЛКИ ДЛЯ ПРОВЕРКИ:\n"
             + "\n".join(f"- {u}" for u in source_links)
         )
+
