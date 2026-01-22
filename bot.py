@@ -337,15 +337,23 @@ async def main_handler(message: Message):
         return
 
     # ВЕТКА: ВОПРОС КАК ЛОВИТЬ
+
     elif intent == "fish_search":
         # 1) Форумный контекст (сниппеты + ссылки) — только для "как/где ловить"
         forum_context = ""
         try:
             forum_context = await scraper.get_rusfishing_context(query, PLACES_CACHE)
         except Exception as e:
-            logging.info("FORUM_CONTEXT_LEN=%s", len(forum_context or ""))
-            logging.info("FORUM_CONTEXT_HEAD=%s", (forum_context or "")[:400])
-            logging.error(f"Rusfishing context error: {e}")
+            logging.exception("Rusfishing context error")  # покажет stacktrace
+            forum_context = ""
+
+        # Логи ДОЛЖНЫ быть тут, а не в except
+        logging.warning("FORUM_CONTEXT_LEN=%s", len(forum_context or ""))
+        logging.warning("FORUM_CONTEXT_HEAD=%s", (forum_context or "")[:400])
+
+        if not forum_context:
+            logging.warning("FORUM_CONTEXT_EMPTY for query=%s loc=%s found_river=%s",
+                            query, loc_name, found_river_key)
 
         # 2) Склеиваем контекст: быстрый справочник + фактура из веток
         extra = river_context
@@ -415,7 +423,7 @@ async def main():
         await bot.session.close()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
