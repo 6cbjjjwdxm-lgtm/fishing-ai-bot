@@ -162,6 +162,11 @@ PROMPT_ADVICE = """
 
 ТВОЯ ЦЕЛЬ:
 Объяснить суть, а не просто перечислить факты. Если спрашивают "как ловить на волкеры", объясни саму механику проводки "елочкой" (walking the dog) и почему это круто.
+
+ДОКАЗАТЕЛЬНОСТЬ:
+- Если в "СПРАВКА ПО ВОДОЕМУ" есть "ВЫЖИМКА С ФОРУМА" — делай выводы в первую очередь из нее.
+- Не выдумывай деревни/ямы, которых нет в выжимке. Если данных мало — так и скажи и предложи 1–2 универсальных места (бровки/ямы/коряжник) без конкретных топонимов.
+- В конце добавь блок "Проверить на форуме:" и перечисли 3–5 ссылок из "ССЫЛКИ ДЛЯ ПРОВЕРКИ".
 """
 
 async def analyze_user_query(text: str) -> dict:
@@ -331,17 +336,30 @@ async def main_handler(message: Message):
         return
 
     # ВЕТКА: ВОПРОС КАК ЛОВИТЬ
-    elif intent == "fish_search":
-        response = await get_chat_response(
-            message.from_user.id,
-            query, 
-            weather="", 
-            loc_name=loc_name,
-            intent="fish_search",
-            extra_context=river_context
-        )
-        await safe_send_markdown(message, response)
-        return
+   elif intent == "fish_search":
+    # 1) Форумный контекст (сниппеты + ссылки) — только для "как/где ловить"
+    forum_context = ""
+    try:
+        forum_context = await scraper.get_rusfishing_context(query, PLACES_CACHE)
+    except Exception as e:
+        logging.error(f"Rusfishing context error: {e}")
+
+    # 2) Склеиваем контекст: быстрый справочник + фактура из веток
+    extra = river_context
+    if forum_context:
+        extra = (extra + "\n\n" if extra else "") + forum_context
+
+    response = await get_chat_response(
+        message.from_user.id,
+        query,
+        weather="",
+        loc_name=loc_name,
+        intent="fish_search",
+        extra_context=extra
+    )
+    await safe_send_markdown(message, response)
+    return
+
 
     # ОБЩИЙ ВОПРОС
     else:
@@ -398,6 +416,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
