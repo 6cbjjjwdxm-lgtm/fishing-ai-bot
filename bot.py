@@ -343,31 +343,26 @@ async def main_handler(message: Message):
         forum_context = ""
         try:
             forum_context = await scraper.get_rusfishing_context(query, PLACES_CACHE)
-        except Exception as e:
+        except Exception:
+            logging.exception("Rusfishing context error")
+            forum_context = ""
+
+        logging.warning("FORUM_CONTEXT_LEN=%s", len(forum_context or ""))
+        logging.warning("FORUM_CONTEXT_HEAD=%s", (forum_context or "")[:400])
+
+        # 2) Принудительный тест Rusfishing (временно, для диагностики)
         try:
-            import aiohttp
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as s:
                 test_url = "https://www.rusfishing.ru/forum/forums/oka.146/"
                 async with s.get(test_url, headers=scraper.headers, allow_redirects=True) as r:
                     txt = await r.text(errors="ignore")
-                    logging.warning("RF_TEST status=%s len=%s", r.status, len(txt))
-                    logging.warning("RF_TEST head=%s", txt[:200].replace("\n", " "))
-        except Exception as e:
+                    logging.warning("RF_TEST status=%s len=%s", r.status, len(txt or ""))
+                    logging.warning("RF_TEST head=%s", (txt or "")[:200].replace("\n", " "))
+        except Exception:
             logging.exception("RF_TEST failed")
-    
-            logging.exception("Rusfishing context error")  # покажет stacktrace
-            forum_context = ""
 
-        # Логи ДОЛЖНЫ быть тут, а не в except
-        logging.warning("FORUM_CONTEXT_LEN=%s", len(forum_context or ""))
-        logging.warning("FORUM_CONTEXT_HEAD=%s", (forum_context or "")[:400])
-
-        if not forum_context:
-            logging.warning("FORUM_CONTEXT_EMPTY for query=%s loc=%s found_river=%s",
-                            query, loc_name, found_river_key)
-
-        # 2) Склеиваем контекст: быстрый справочник + фактура из веток
+        # 3) Склеиваем контекст: быстрый справочник + фактура из веток
         extra = river_context
         if forum_context:
             extra = (extra + "\n\n" if extra else "") + forum_context
