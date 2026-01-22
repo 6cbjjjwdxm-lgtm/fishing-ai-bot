@@ -342,6 +342,8 @@ async def main_handler(message: Message):
         try:
             forum_context = await scraper.get_rusfishing_context(query, PLACES_CACHE)
         except Exception as e:
+            logging.info("FORUM_CONTEXT_LEN=%s", len(forum_context or ""))
+            logging.info("FORUM_CONTEXT_HEAD=%s", (forum_context or "")[:400])
             logging.error(f"Rusfishing context error: {e}")
 
         # 2) Склеиваем контекст: быстрый справочник + фактура из веток
@@ -417,6 +419,10 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
+
+
+
 
 
 
