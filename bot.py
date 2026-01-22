@@ -321,14 +321,14 @@ async def main_handler(message: Message):
             for loc in locations[:14]:
                 kb.button(text=loc, callback_data=f"loc:{found_river_key}:{loc}:{day_offset}")
             kb.adjust(2)
-            
+
             await message.reply(
                 f"📍 **{found_river_key}**. Выберите место (база Русфишинга):",
                 reply_markup=kb.as_markup(),
                 parse_mode="Markdown"
             )
             return
-        
+
         # Если реки нет в базе - просто прогноз по городу
         weather = await get_weather_forecast(loc_name, day_offset)
         resp = await get_chat_response(message.from_user.id, query, weather, loc_name, "forecast")
@@ -336,35 +336,36 @@ async def main_handler(message: Message):
         return
 
     # ВЕТКА: ВОПРОС КАК ЛОВИТЬ
-   elif intent == "fish_search":
-    # 1) Форумный контекст (сниппеты + ссылки) — только для "как/где ловить"
-    forum_context = ""
-    try:
-        forum_context = await scraper.get_rusfishing_context(query, PLACES_CACHE)
-    except Exception as e:
-        logging.error(f"Rusfishing context error: {e}")
+    elif intent == "fish_search":
+        # 1) Форумный контекст (сниппеты + ссылки) — только для "как/где ловить"
+        forum_context = ""
+        try:
+            forum_context = await scraper.get_rusfishing_context(query, PLACES_CACHE)
+        except Exception as e:
+            logging.error(f"Rusfishing context error: {e}")
 
-    # 2) Склеиваем контекст: быстрый справочник + фактура из веток
-    extra = river_context
-    if forum_context:
-        extra = (extra + "\n\n" if extra else "") + forum_context
+        # 2) Склеиваем контекст: быстрый справочник + фактура из веток
+        extra = river_context
+        if forum_context:
+            extra = (extra + "\n\n" if extra else "") + forum_context
 
-    response = await get_chat_response(
-        message.from_user.id,
-        query,
-        weather="",
-        loc_name=loc_name,
-        intent="fish_search",
-        extra_context=extra
-    )
-    await safe_send_markdown(message, response)
-    return
-
+        response = await get_chat_response(
+            message.from_user.id,
+            query,
+            weather="",
+            loc_name=loc_name,
+            intent="fish_search",
+            extra_context=extra
+        )
+        await safe_send_markdown(message, response)
+        return
 
     # ОБЩИЙ ВОПРОС
     else:
         resp = await get_chat_response(message.from_user.id, query, "", "", "general")
         await safe_send_markdown(message, resp)
+        return
+
 
 
 # =========================
@@ -416,6 +417,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
