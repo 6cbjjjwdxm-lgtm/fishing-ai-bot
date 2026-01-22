@@ -319,8 +319,9 @@ async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
     async with aiohttp.ClientSession(timeout=timeout) as session:
         threads = await search_threads_in_forum(session, forum_url, query_words, pages=2)
         cookies = parse_cookie_header(RUSFISHING_COOKIE)
+        
         if cookies:
-        session.cookie_jar.update_cookies(cookies)
+            session.cookie_jar.update_cookies(cookies)
 
         logging.warning("RF_CTX threads_found=%s", len(threads))
 
