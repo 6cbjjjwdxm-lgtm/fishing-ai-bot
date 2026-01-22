@@ -296,6 +296,7 @@ async def main_handler(message: Message):
     analysis = await analyze_user_query(query)
     intent = analysis.get("intent", "general")
     loc_name = analysis.get("location_name", "").strip()
+    logging.warning("INTENT=%s loc=%s query=%s", intent, loc_name, query)
     
     # 2. Поиск контекста реки
     river_context = ""
@@ -419,7 +420,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-
 
 
 
