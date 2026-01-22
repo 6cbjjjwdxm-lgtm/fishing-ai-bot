@@ -2,6 +2,9 @@ import aiohttp
 import asyncio
 import logging
 import json
+import os
+
+RUSFISHING_COOKIE = os.getenv("RUSFISHING_COOKIE", "").strip()
 import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -38,6 +41,16 @@ async def fetch_forum_page(session, url: str) -> str | None:
     except Exception:
         logging.exception("Ошибка парсинга %s", url)
         return None
+
+def parse_cookie_header(cookie_header: str) -> dict:
+    out = {}
+    for part in (cookie_header or "").split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
 
 def extract_locations_from_html(html: str, river_name: str):
     soup = BeautifulSoup(html, "lxml")
@@ -305,6 +318,10 @@ async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         threads = await search_threads_in_forum(session, forum_url, query_words, pages=2)
+        cookies = parse_cookie_header(RUSFISHING_COOKIE)
+        if cookies:
+        session.cookie_jar.update_cookies(cookies)
+
         logging.warning("RF_CTX threads_found=%s", len(threads))
 
         if not threads:
