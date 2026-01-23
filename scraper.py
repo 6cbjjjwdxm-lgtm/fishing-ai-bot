@@ -1,10 +1,11 @@
-import aiohttp
 import asyncio
 import logging
 import json
 import os
+import aiohttp
 
 RUSFISHING_COOKIE = os.getenv("RUSFISHING_COOKIE", "").strip()
+RUSFISHING_PROXY = os.getenv("RUSFISHING_PROXY", "").strip()
 import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -35,24 +36,27 @@ async def fetch_forum_page(session, url):
         if RUSFISHING_COOKIE:
             req_headers["Cookie"] = RUSFISHING_COOKIE
 
-        async with session.get(url, headers=req_headers, allow_redirects=True) as resp:
+        proxy = RUSFISHING_PROXY or None
+
+        async with session.get(
+            url,
+            headers=req_headers,
+            allow_redirects=True,
+            proxy=proxy,          # ключевое
+        ) as resp:
             txt = await resp.text(errors="ignore")
             logging.warning("RF HTTP %s %s", resp.status, url)
             logging.warning("RF BODY_HEAD %s", (txt or "")[:200].replace("\n", " "))
-            logging.warning("RF_COOKIE_LEN=%s", len(RUSFISHING_COOKIE))
 
-            # диагностика: видит ли сервер логин
-            if txt and 'data-template="login"' in txt:
-                logging.warning("RF GOT_LOGIN_PAGE %s", url)
             if txt and 'data-logged-in="true"' in txt:
                 logging.warning("RF LOGGED_IN_TRUE %s", url)
 
             if resp.status == 200 and txt:
                 return txt
             return None
-    except Exception as e:
-        logging.error(f"Ошибка парсинга {url}: {e}")
-    return None
+    except Exception:
+        logging.exception("Ошибка парсинга %s", url)
+        return None
 
 def parse_cookie_header(cookie_header: str) -> dict:
     out = {}
@@ -78,6 +82,12 @@ def extract_locations_from_html(html: str, river_name: str):
             locations.add(clean_name.strip(" .,-"))
 
     return sorted(list(locations))
+
+async def rf_proxy_check():
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        html = await fetch_forum_page(session, "https://api.ipify.org/?format=json")
+        logging.warning("PROXY_IPIFY=%s", html)
 
 async def update_rusfishing_cache():
     logging.info("🎣 Запуск обновления базы Русфишинга...")
