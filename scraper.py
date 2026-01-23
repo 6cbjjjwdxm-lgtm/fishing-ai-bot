@@ -29,18 +29,30 @@ headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
 
-async def fetch_forum_page(session, url: str) -> str | None:
+async def fetch_forum_page(session, url):
     try:
-        async with session.get(url, headers=headers, allow_redirects=True) as resp:
+        req_headers = dict(headers)
+        if RUSFISHING_COOKIE:
+            req_headers["Cookie"] = RUSFISHING_COOKIE
+
+        async with session.get(url, headers=req_headers, allow_redirects=True) as resp:
             txt = await resp.text(errors="ignore")
             logging.warning("RF HTTP %s %s", resp.status, url)
             logging.warning("RF BODY_HEAD %s", (txt or "")[:200].replace("\n", " "))
+            logging.warning("RF_COOKIE_LEN=%s", len(RUSFISHING_COOKIE))
+
+            # диагностика: видит ли сервер логин
+            if txt and 'data-template="login"' in txt:
+                logging.warning("RF GOT_LOGIN_PAGE %s", url)
+            if txt and 'data-logged-in="true"' in txt:
+                logging.warning("RF LOGGED_IN_TRUE %s", url)
+
             if resp.status == 200 and txt:
                 return txt
             return None
-    except Exception:
-        logging.exception("Ошибка парсинга %s", url)
-        return None
+    except Exception as e:
+        logging.error(f"Ошибка парсинга {url}: {e}")
+    return None
 
 def parse_cookie_header(cookie_header: str) -> dict:
     out = {}
