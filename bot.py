@@ -339,21 +339,15 @@ async def main_handler(message: Message):
     # ВЕТКА: ВОПРОС КАК ЛОВИТЬ
 
     elif intent == "fish_search":
-        # 1) Форумный контекст (сниппеты + ссылки) — только для "как/где ловить"
-        forum_context = ""
-        try:
-            forum_context = await scraper.get_rusfishing_context(query, PLACES_CACHE)
-        except Exception:
-            logging.exception("Rusfishing context error")
-            forum_context = ""
+        # OFFLINE MODE: форум не трогаем, используем только кэш мест (PLACES_CACHE)
+        extra = river_context  # например: "ВОДОЕМ: ... Популярные точки: ..."
 
-        logging.warning("FORUM_CONTEXT_LEN=%s", len(forum_context or ""))
-        logging.warning("FORUM_CONTEXT_HEAD=%s", (forum_context or "")[:400])
-
-        # 2) Склеиваем контекст: быстрый справочник + фактура из веток
-        extra = river_context
-        if forum_context:
-            extra = (extra + "\n\n" if extra else "") + forum_context
+        # (опционально) если в кэше ничего не нашлось — можно подсказать пользователю
+        if not extra:
+            extra = (
+                "Данных по этому водоему в кэше нет. "
+                "Могу подсказать универсальные места: бровки, русловые ямы, коряжник, выходы из ям."
+            )
 
         response = await get_chat_response(
             message.from_user.id,
@@ -365,6 +359,7 @@ async def main_handler(message: Message):
         )
         await safe_send_markdown(message, response)
         return
+
 
     # ОБЩИЙ ВОПРОС
     else:
@@ -380,7 +375,8 @@ async def main_handler(message: Message):
 async def periodic_cache_update():
     global PLACES_CACHE
     while True:
-        await asyncio.sleep(24 * 3600) 
+        await asyncio.sleep(24 * 3600)
+        logging.info("Cache update disabled on Render (offline mode).")
         try:
             logging.info("⏳ Фоновое обновление базы...")
             new_cache = await scraper.update_rusfishing_cache()
@@ -423,6 +419,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
