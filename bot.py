@@ -16,9 +16,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# Используем AsyncOpenAI
 from openai import AsyncOpenAI
-import scraper  # Наш модуль парсера
+import scraper  # модуль: load_cache(), get_rusfishing_context()
 
 # =========================
 # CONFIG
@@ -55,35 +54,39 @@ async def safe_edit_markdown(message: Message, text: str, reply_markup=None):
 
 def extract_day_offset(text: str) -> int:
     t = (text or "").lower()
-    if "послезавтра" in t: return 2
-    if "завтра" in t: return 1
+    if "послезавтра" in t:
+        return 2
+    if "завтра" in t:
+        return 1
     return 0
 
 # =========================
 # WEATHER
 # =========================
 def get_moon_phase() -> str:
-    phases = ["🌑 Новолуние", "🌒 Растущая", "🌓 1-я четверть", "🌔 Растущая", "🌕 Полнолуние", "🌖 Убывающая", "🌗 Последняя четверть", "🌘 Старая"]
+    phases = ["🌑 Новолуние", "🌒 Растущая", "🌓 1-я четверть", "🌔 Растущая",
+              "🌕 Полнолуние", "🌖 Убывающая", "🌗 Последняя четверть", "🌘 Старая"]
     days = (datetime.date.today() - datetime.date(2000, 1, 6)).days
     return phases[int(((days % 29.53) / 29.53) * 8) % 8]
 
 async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
-    if not OPENWEATHER_API_KEY or not city: return None
-    if day_offset > 2: day_offset = 2
+    if not OPENWEATHER_API_KEY or not city:
+        return None
+    if day_offset > 2:
+        day_offset = 2
 
-    # Улучшенный поиск: пробуем с областью (для МО), потом с RU, потом просто название
     queries = [
-        f"{city}, Moscow Oblast, RU", 
-        f"{city}, RU", 
+        f"{city}, Moscow Oblast, RU",
+        f"{city}, RU",
         city
     ]
-    
+
     url = "https://api.openweathermap.org/data/2.5/forecast"
     base_params = {"appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"}
 
     timeout = aiohttp.ClientTimeout(total=5)
     data = None
-    
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for q in queries:
             params = base_params.copy()
@@ -97,16 +100,18 @@ async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
                             break
             except Exception:
                 continue
-    
-    if not data: return None
+
+    if not data:
+        return None
 
     target_date = datetime.date.today() + datetime.timedelta(days=day_offset)
     target_str = target_date.strftime("%Y-%m-%d")
     forecasts = data.get("list", [])
-    
+
     day_data = [f for f in forecasts if target_str in f.get("dt_txt", "")]
-    if not day_data: 
-        if not forecasts: return None
+    if not day_data:
+        if not forecasts:
+            return None
         best = forecasts[0]
     else:
         best = next((f for f in day_data if "12:00" in f.get("dt_txt", "")), day_data[0])
@@ -160,17 +165,13 @@ PROMPT_ADVICE = """
 - НИКОГДА не желай "удачи" или "успехов" (плохая примета!).
 - В конце всегда пиши: "Ни хвоста, ни чешуи!" или "НХНЧ!".
 
-ТВОЯ ЦЕЛЬ:
-Объяснить суть, а не просто перечислить факты. Если спрашивают "как ловить на волкеры", объясни саму механику проводки "елочкой" (walking the dog) и почему это круто.
-
 ДОКАЗАТЕЛЬНОСТЬ:
-- Если в "СПРАВКА ПО ВОДОЕМУ" есть "ВЫЖИМКА С ФОРУМА" — делай выводы в первую очередь из нее.
+- Если в "СПРАВКА ПО ВОДОЕМУ" есть "ВЫЖИМКА С RUSFISHING" — делай выводы в первую очередь из нее.
 - Не выдумывай деревни/ямы, которых нет в выжимке. Если данных мало — так и скажи и предложи 1–2 универсальных места (бровки/ямы/коряжник) без конкретных топонимов.
 - В конце добавь блок "Проверить на форуме:" и перечисли 3–5 ссылок из "ССЫЛКИ ДЛЯ ПРОВЕРКИ".
 """
 
 async def analyze_user_query(text: str) -> dict:
-    """Определяем намерение + выделяем название реки/водоема"""
     system = """
 Ты — классификатор запросов.
 1. "forecast" — вопросы про КЛЕВ на конкретную дату/время ("клюет ли завтра", "прогноз на выходные", "клев на Оке").
@@ -192,44 +193,41 @@ async def analyze_user_query(text: str) -> dict:
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         logging.error(f"Analysis Error: {e}")
-        return {"intent": "general"}
+        return {"intent": "general", "location_name": ""}
 
-async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str, intent: str, extra_context: str = "") -> str:
-    # Выбор промпта
+async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str,
+                            intent: str, extra_context: str = "") -> str:
     system_text = PROMPT_FORECAST if intent == "forecast" else PROMPT_ADVICE
-    
-    # Формируем сообщение пользователя
+
     user_content = f"ВОПРОС ПОЛЬЗОВАТЕЛЯ: {text}\n"
-    
+
     if weather:
         user_content += f"\n📊 ПОГОДА:\n{weather}\n"
-    
+
     if extra_context:
         user_content += f"\nℹ️ СПРАВКА ПО ВОДОЕМУ:\n{extra_context}\n"
-        
+
     if intent == "forecast":
         user_content += "\n(Дай прогноз строго по шаблону)"
     else:
         user_content += "\n(Дай экспертный совет, погоду расписывать не нужно, если она не критична)"
 
-    # Работа с историей сообщений
     if user_id not in user_histories:
         user_histories[user_id] = []
-    
-    # Всегда обновляем System Message на актуальный
+
     sys_msg_idx = -1
     for i, m in enumerate(user_histories[user_id]):
         if m["role"] == "system":
             sys_msg_idx = i
             break
-            
+
     if sys_msg_idx >= 0:
         user_histories[user_id][sys_msg_idx] = {"role": "system", "content": system_text}
     else:
         user_histories[user_id].insert(0, {"role": "system", "content": system_text})
 
     user_histories[user_id].append({"role": "user", "content": user_content})
-    
+
     if len(user_histories[user_id]) > 8:
         user_histories[user_id] = [user_histories[user_id][0]] + user_histories[user_id][-6:]
 
@@ -246,7 +244,6 @@ async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str
         logging.error(f"AI Error: {e}")
         return "⚠️ ИИ задумался. Попробуй еще раз."
 
-
 # =========================
 # HANDLERS
 # =========================
@@ -256,21 +253,20 @@ async def cmd_start(message: Message):
 
 @dp.callback_query(F.data.startswith("loc:"))
 async def cb_location_select(callback: CallbackQuery):
-    # data: loc:RiverName:PlaceName:DayOffset
     try:
         await callback.answer()
         parts = callback.data.split(":")
-        # Защита от старых коллбеков разной длины
-        if len(parts) < 4: return
-        
+        if len(parts) < 4:
+            return
+
         _, river, place, day_s = parts
         day = int(day_s)
-        
+
         await safe_edit_markdown(callback.message, f"✅ Выбрано: {place} ({river}). Анализирую...")
 
         weather_task = asyncio.create_task(get_weather_forecast(place, day))
         weather = await weather_task or f"⚠️ Погода для {place} не найдена."
-        
+
         response = await get_chat_response(
             callback.from_user.id,
             f"Клев на {river} в районе {place}",
@@ -279,8 +275,8 @@ async def cb_location_select(callback: CallbackQuery):
             "forecast"
         )
         await safe_send_markdown(callback.message, response)
-        
-    except Exception as e:
+
+    except Exception:
         logging.exception("Error in callback")
         await safe_send_markdown(callback.message, "⚠️ Ошибка обработки.")
 
@@ -291,31 +287,28 @@ async def main_handler(message: Message):
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     day_offset = extract_day_offset(query)
-    
-    # 1. Анализ интента
+
+    # 1) анализ интента
     analysis = await analyze_user_query(query)
-    intent = analysis.get("intent", "general")
-    loc_name = analysis.get("location_name", "").strip()
+    intent = (analysis.get("intent") or "general").strip()
+    loc_name = (analysis.get("location_name") or "").strip()
     logging.warning("INTENT=%s loc=%s query=%s", intent, loc_name, query)
-    
-    # 2. Поиск контекста реки
+
+    # 2) контекст по кэшу мест
     river_context = ""
     found_river_key = None
-    
-    # Улучшенный поиск: ищем вхождение ключа (Ока) в запрос (Оке) или наоборот
+
     for key in PLACES_CACHE:
-        # Если "ока" в "на оке" ИЛИ "можай" в "можайка"
         if key.lower() in query.lower() or (loc_name and key.lower() in loc_name.lower()):
             found_river_key = key
             break
-            
+
     if found_river_key:
         top_places = ", ".join(PLACES_CACHE[found_river_key].get("locations", [])[:5])
         river_context = f"ВОДОЕМ: {found_river_key}. Популярные точки: {top_places}."
 
-    # ВЕТКА: ПРОГНОЗ
+    # ===== forecast =====
     if intent == "forecast":
-        # Если нашли реку -> даем кнопки
         if found_river_key:
             locations = PLACES_CACHE[found_river_key].get("locations", [])
             kb = InlineKeyboardBuilder()
@@ -330,23 +323,28 @@ async def main_handler(message: Message):
             )
             return
 
-        # Если реки нет в базе - просто прогноз по городу
         weather = await get_weather_forecast(loc_name, day_offset)
-        resp = await get_chat_response(message.from_user.id, query, weather, loc_name, "forecast")
+        resp = await get_chat_response(message.from_user.id, query, weather or "", loc_name, "forecast")
         await safe_send_markdown(message, resp)
         return
 
-    # ВЕТКА: ВОПРОС КАК ЛОВИТЬ
-
+    # ===== fish_search =====
     elif intent == "fish_search":
-        # OFFLINE MODE: форум не трогаем, используем только кэш мест (PLACES_CACHE)
-        extra = river_context  # например: "ВОДОЕМ: ... Популярные точки: ..."
+        # 1) берём “легкий” контекст из кэша
+        extra = river_context
 
-        # (опционально) если в кэше ничего не нашлось — можно подсказать пользователю
+        # 2) добавляем выдачу Vertex AI Search (форум)
+        try:
+            forum_context = await scraper.get_rusfishing_context(query)
+            if forum_context:
+                extra = (extra + "\n\n" + forum_context).strip() if extra else forum_context
+        except Exception as e:
+            logging.warning("Vertex forum context failed: %s", e)
+
         if not extra:
             extra = (
-                "Данных по этому водоему в кэше нет. "
-                "Могу подсказать универсальные места: бровки, русловые ямы, коряжник, выходы из ям."
+                "Данных по этому водоему пока мало. "
+                "Универсально: смотри бровки, русловые ямы, коряжник, выходы из ям, обратки."
             )
 
         response = await get_chat_response(
@@ -360,30 +358,20 @@ async def main_handler(message: Message):
         await safe_send_markdown(message, response)
         return
 
-
-    # ОБЩИЙ ВОПРОС
+    # ===== general =====
     else:
         resp = await get_chat_response(message.from_user.id, query, "", "", "general")
         await safe_send_markdown(message, resp)
         return
 
-
-
 # =========================
 # BACKGROUND TASKS
 # =========================
 async def periodic_cache_update():
-    global PLACES_CACHE
+    # Кэш мест обновляем отдельно (например через GitHub Actions), а не парсим форум с Render.
     while True:
         await asyncio.sleep(24 * 3600)
-        logging.info("Cache update disabled on Render (offline mode).")
-        try:
-            logging.info("⏳ Фоновое обновление базы...")
-            new_cache = await scraper.update_rusfishing_cache()
-            if new_cache:
-                PLACES_CACHE = new_cache
-        except Exception as e:
-            logging.error(f"Background update failed: {e}")
+        logging.info("Cache update: skipped (offline).")
 
 async def start_web_server():
     app = web.Application()
@@ -400,7 +388,7 @@ async def start_web_server():
 async def main():
     global PLACES_CACHE
     PLACES_CACHE = scraper.load_cache()
-    logging.info(f"Loaded {len(PLACES_CACHE)} rivers from cache.")
+    logging.info("Loaded %s rivers from cache.", len(PLACES_CACHE))
 
     bot = Bot(token=TELEGRAM_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
