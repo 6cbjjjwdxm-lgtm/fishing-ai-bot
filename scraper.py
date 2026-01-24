@@ -148,26 +148,29 @@ def _parse_vertex_results(data: dict) -> List[Dict]:
     return out
     
 async def get_rusfishing_context(user_query: str) -> str:
-    # тут можно добавить легкую нормализацию запроса
     query = _norm(user_query)
     if not query:
         return ""
 
-    results = await vertex_search(query, page_size=7)
+    results = await vertex_search(query, page_size=5)  # было 7
     if not results:
         return ""
 
     lines = []
     links = []
-    for i, r in enumerate(results[:7], 1):
+    for i, r in enumerate(results[:5], 1):
         t = r.get("title") or "Без названия"
         s = r.get("snippet") or ""
         u = r.get("link") or ""
+
+        # режем сниппет, чтобы не раздувать prompt
+        if len(s) > 240:
+            s = s[:240].rsplit(" ", 1)[0] + "…"
+
         lines.append(f"{i}. {t} — {s}".strip())
         if u:
             links.append(u)
 
-    # дедуп ссылок
     uniq_links = []
     seen = set()
     for u in links:
@@ -176,11 +179,18 @@ async def get_rusfishing_context(user_query: str) -> str:
         seen.add(u)
         uniq_links.append(u)
 
-    return (
+    text = (
         "ВЫЖИМКА С RUSFISHING (Vertex AI Search):\n"
         + "\n".join(lines)
         + "\n\nССЫЛКИ ДЛЯ ПРОВЕРКИ:\n"
-        + "\n".join(f"- {u}" for u in uniq_links[:7])
+        + "\n".join(f"- {u}" for u in uniq_links[:5])
     )
+
+    # общий лимит размера контекста
+    if len(text) > 1300:
+        text = text[:1300].rsplit("\n", 1)[0] + "\n…"
+
+    return text
+
 
 
