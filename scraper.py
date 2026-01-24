@@ -1,119 +1,18 @@
-import asyncio
-import logging
 import json
+import logging
 import os
-import aiohttp
-
-RUSFISHING_COOKIE = os.getenv("RUSFISHING_COOKIE", "").strip()
-RUSFISHING_PROXY = os.getenv("RUSFISHING_PROXY", "").strip()
 import re
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+import time
+from typing import Dict, List
+
+import aiohttp
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request as GoogleAuthRequest
 
 # =========================
-# CACHE
+# CACHE (для кнопок мест)
 # =========================
 CACHE_FILE = "places_cache.json"
-
-RIVER_URLS = {
-    "Ока": "https://www.rusfishing.ru/forum/forums/reka-oka.73/",
-    "Река Ока": "https://www.rusfishing.ru/forum/forums/reka-oka.73/",
-    "Москва-река": "https://www.rusfishing.ru/forum/forums/moskva-reka.147/",
-    "Иваньковское вдхр": "https://www.rusfishing.ru/forum/forums/ivankovskoe-vdxr.53/",
-    "Рузуское вдхр": "https://www.rusfishing.ru/forum/forums/ruzskoe-vdxr.54/",
-    "Яузское вдхр": "https://www.rusfishing.ru/forum/forums/jauzskoe-vdxr.56/",
-    "Можайское вдхр": "https://www.rusfishing.ru/forum/forums/mozhajskoe-vdxr.55/",
-    "Истринское вдхр": "https://www.rusfishing.ru/forum/forums/istrinskoye-vodokhranilishche.69/",
-}
-
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
-
-async def fetch_forum_page(session, url):
-    try:
-        req_headers = dict(headers)
-        if RUSFISHING_COOKIE:
-            req_headers["Cookie"] = RUSFISHING_COOKIE
-
-        proxy = RUSFISHING_PROXY or None
-
-        async with session.get(
-            url,
-            headers=req_headers,
-            allow_redirects=True,
-            proxy=proxy,          # ключевое
-        ) as resp:
-            txt = await resp.text(errors="ignore")
-            logging.warning("RF HTTP %s %s", resp.status, url)
-            logging.warning("RF BODY_HEAD %s", (txt or "")[:200].replace("\n", " "))
-
-            if txt and 'data-logged-in="true"' in txt:
-                logging.warning("RF LOGGED_IN_TRUE %s", url)
-
-            if resp.status == 200 and txt:
-                return txt
-            return None
-    except Exception:
-        logging.exception("Ошибка парсинга %s", url)
-        return None
-
-def parse_cookie_header(cookie_header: str) -> dict:
-    out = {}
-    for part in (cookie_header or "").split(";"):
-        part = part.strip()
-        if not part or "=" not in part:
-            continue
-        k, v = part.split("=", 1)
-        out[k.strip()] = v.strip()
-    return out
-
-def extract_locations_from_html(html: str, river_name: str):
-    soup = BeautifulSoup(html, "lxml")
-    locations = set()
-
-    threads = soup.select(".structItem-title a")
-    for thread in threads:
-        text = thread.get_text(strip=True)
-        clean_name = re.sub(r"\(.*?\)", "", text)
-        clean_name = clean_name.replace(river_name, "").strip()
-
-        if 2 < len(clean_name) < 40:
-            locations.add(clean_name.strip(" .,-"))
-
-    return sorted(list(locations))
-
-async def rf_proxy_check():
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        html = await fetch_forum_page(session, "https://api.ipify.org/?format=json")
-        logging.warning("PROXY_IPIFY=%s", html)
-
-async def update_rusfishing_cache():
-    logging.info("🎣 Запуск обновления базы Русфишинга...")
-
-    try:
-        with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            cache = json.load(f)
-    except FileNotFoundError:
-        cache = {}
-
-    timeout = aiohttp.ClientTimeout(total=15)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for river, url in RIVER_URLS.items():
-            logging.info("Парсим: %s ...", river)
-            html = await fetch_forum_page(session, url)
-            if html:
-                locs = extract_locations_from_html(html, river)
-                if locs:
-                    cache[river] = {"url": url, "locations": locs}
-            await asyncio.sleep(1)
-
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
-
-    logging.info("✅ База мест обновлена! Всего рек: %s", len(cache))
-    return cache
 
 def load_cache():
     try:
@@ -123,260 +22,144 @@ def load_cache():
         return {}
 
 # =========================
-# RUSFISHING "RAG" LAYER
+# VERTEX AI SEARCH CONFIG
 # =========================
+VERTEX_PROJECT_ID = (os.getenv("VERTEX_PROJECT_ID") or "").strip()
+VERTEX_LOCATION = (os.getenv("VERTEX_LOCATION") or "global").strip()
+VERTEX_ENGINE_ID = (os.getenv("VERTEX_ENGINE_ID") or "").strip()
+GOOGLE_SA_JSON = (os.getenv("GOOGLE_SA_JSON") or "").strip()
 
-STOP_TITLE_WORDS = {
-    "отчёт", "отчет", "отчеты", "отчёты", "вопрос", "вопросы", "помогите",
-    "лёд", "лед", "запрет", "нерест", "болталка", "флуд", "объявления"
-}
+# access token cache
+_token_cache = {"token": None, "exp": 0}
 
-FISH_ALIASES = {
-    "судак": ["судак", "судач", "клыкаст"],
-    "щука": ["щука", "щур", "пятнист"],
-    "окунь": ["окун", "полосат"],
-    "жерех": ["жерех"],
-}
+def _get_access_token() -> str:
+    now = int(time.time())
+    if _token_cache["token"] and now < _token_cache["exp"]:
+        return _token_cache["token"]
 
-WATERBODY_ALIASES = {
-    "можайское": "Можайское вдхр",
-    "можайском": "Можайское вдхр",
-    "можайка": "Можайское вдхр",
-    "можайское вдхр": "Можайское вдхр",
-    "истра": "Истринское вдхр",
-    "истринском": "Истринское вдхр",
-    "истринское вдхр": "Истринское вдхр",
-    "руза": "Рузуское вдхр",
-    "рузское": "Рузуское вдхр",
-    "рузском": "Рузуское вдхр",
-    "иванька": "Иваньковское вдхр",
-    "иваньковское": "Иваньковское вдхр",
-    "иваньковском": "Иваньковское вдхр",
-    "яуза": "Яузское вдхр",
-    "ока": "Ока",
-    "оке": "Ока",
-    "москва-река": "Москва-река",
-    "москварека": "Москва-река",
-    "москве-реке": "Москва-река",
-    "москве реке": "Москва-река",
-}
+    if not GOOGLE_SA_JSON:
+        raise RuntimeError("GOOGLE_SA_JSON is not set")
 
-def normalize_text(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip().lower()
+    info = json.loads(GOOGLE_SA_JSON)
+    creds = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+    creds.refresh(GoogleAuthRequest())
 
-def find_forum_url_for_waterbody(user_text: str, cache: dict) -> str | None:
-    t = normalize_text(user_text)
+    token = creds.token
+    _token_cache["token"] = token
+    _token_cache["exp"] = now + 3000  # ~50 минут
+    return token
 
-    # Мини-нормализация падежей/форм (самое частое)
-    t = re.sub(r"\bоке\b", "ока", t)
-    t = re.sub(r"\bможайском\b", "можайское", t)
-    t = re.sub(r"\bводохранилище\b", "вдхр", t)
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
 
-    logging.warning("RF_FIND t=%s", t)
-    logging.warning("RF_FIND cache_keys=%s", list(cache.keys())[:30])
+def _pick_first(*vals: str) -> str:
+    for v in vals:
+        v = _norm(v)
+        if v:
+            return v
+    return ""
 
-    # 1) Сначала алиасы (они должны покрывать 90% кейсов)
-    for k, canonical in WATERBODY_ALIASES.items():
-        if k in t:
-            # сначала пробуем cache (если он заполнен)
-            if canonical in cache and isinstance(cache[canonical], dict) and cache[canonical].get("url"):
-                return cache[canonical]["url"]
-            # потом прямой маппинг
-            if canonical in RIVER_URLS:
-                return RIVER_URLS[canonical]
+async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
+    if not (VERTEX_PROJECT_ID and VERTEX_LOCATION and VERTEX_ENGINE_ID):
+        raise RuntimeError("VERTEX_PROJECT_ID / VERTEX_LOCATION / VERTEX_ENGINE_ID not set")
 
-    # 2) Потом прямое вхождение ключей cache в текст
-    for river in cache.keys():
-        if normalize_text(river) in t:
-            if isinstance(cache[river], dict) and cache[river].get("url"):
-                return cache[river]["url"]
+    token = _get_access_token()
 
-    # 3) Потом прямое вхождение ключей RIVER_URLS в текст
-    for river, url in RIVER_URLS.items():
-        if normalize_text(river) in t:
-            return url
+    # В документации встречаются servingConfigs:
+    # .../engines/*/servingConfigs/default_serving_config (и варианты default_search в UI)
+    # Мы пробуем оба варианта по очереди.
+    serving_configs = [
+        f"projects/{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}/collections/default_collection"
+        f"/engines/{VERTEX_ENGINE_ID}/servingConfigs/default_search",
+        f"projects/{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}/collections/default_collection"
+        f"/engines/{VERTEX_ENGINE_ID}/servingConfigs/default_serving_config",
+    ]
 
-    return None
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"query": query, "pageSize": max(1, min(int(page_size), 25)), "safeSearch": True}
 
-def extract_thread_links_from_forum_html(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "lxml")
+    timeout = aiohttp.ClientTimeout(total=20)
+
+    last_error = None
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for sc in serving_configs:
+            url = f"https://discoveryengine.googleapis.com/v1beta/{sc}:search"
+            try:
+                async with session.post(url, headers=headers, json=payload) as r:
+                    data = await r.json()
+                    if r.status != 200:
+                        last_error = f"HTTP {r.status}: {data}"
+                        continue
+                    return _parse_vertex_results(data)
+            except Exception as e:
+                last_error = str(e)
+
+    raise RuntimeError(f"Vertex search failed: {last_error}")
+
+def _parse_vertex_results(data: dict) -> List[Dict]:
     out = []
-    for a in soup.select(".structItem-title a"):
-        title = a.get_text(" ", strip=True)
-        href = a.get("href")
-        if not href or not title:
-            continue
-        url = urljoin("https://www.rusfishing.ru", href)
-        out.append({"title": title, "url": url})
+    for item in data.get("results", []) or []:
+        doc = item.get("document") or {}
+        derived = doc.get("derivedStructData") or {}
+
+        title = _pick_first(
+            derived.get("title"),
+            doc.get("title"),
+            derived.get("htmlTitle"),
+        )
+        link = _pick_first(
+            derived.get("link"),
+            derived.get("url"),
+            doc.get("id"),
+        )
+        snippet = _pick_first(
+            derived.get("snippet"),
+            derived.get("description"),
+            derived.get("htmlSnippet"),
+        )
+
+        # если ссылок нет — всё равно добавим, но ссылка будет пустая
+        out.append({"title": title, "link": link, "snippet": snippet})
+
     return out
 
-def looks_like_good_thread_title(title: str) -> bool:
-    t = normalize_text(title)
-    if len(t) < 3:
-        return False
-    for w in STOP_TITLE_WORDS:
-        if w in t:
-            return False
-    return True
-
-async def get_top_threads_in_forum(session, forum_url: str, limit: int = 6) -> list[dict]:
-    html = await fetch_forum_page(session, forum_url)
-    if not html:
-        return []
-    threads = extract_thread_links_from_forum_html(html)
-    out = []
-    for th in threads:
-        if looks_like_good_thread_title(th["title"]):
-            out.append(th)
-        if len(out) >= limit:
-            break
-    return out
-
-async def search_threads_in_forum(session, forum_url: str, query_words: list[str], pages: int = 2) -> list[dict]:
-    query_words = [normalize_text(w) for w in query_words if w]
-    results = []
-
-    for p in range(1, pages + 1):
-        # FIX: тут должен быть forum_url, а не thread_url
-        url = forum_url if p == 1 else forum_url.rstrip("/") + f"/page-{p}/"
-        html = await fetch_forum_page(session, url)
-        if not html:
-            continue
-
-        threads = extract_thread_links_from_forum_html(html)
-        for th in threads:
-            title = th["title"]
-            if not looks_like_good_thread_title(title):
-                continue
-            title_norm = normalize_text(title)
-            score = sum(1 for w in query_words if w and w in title_norm)
-            if score > 0:
-                results.append({**th, "score": score})
-
-        await asyncio.sleep(0.6)
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-
-    seen = set()
-    uniq = []
-    for r in results:
-        if r["url"] in seen:
-            continue
-        seen.add(r["url"])
-        uniq.append(r)
-    return uniq[:6]
-
-def extract_posts_from_thread_html(html: str, limit: int = 10) -> list[dict]:
-    soup = BeautifulSoup(html, "lxml")
-    posts = []
-
-    items = soup.select("article.message")
-    if not items:
-        items = soup.select(".message")
-
-    for it in items[:limit]:
-        a = it.select_one("a[href*='#post-'], a.u-concealed[href]")
-        permalink = urljoin("https://www.rusfishing.ru", a.get("href")) if a and a.get("href") else None
-
-        body = it.select_one(".message-body") or it.select_one(".bbWrapper") or it
-        text = body.get_text(" ", strip=True)
-        text = re.sub(r"\s+", " ", text).strip()
-
-        if len(text) > 320:
-            text = text[:320].rsplit(" ", 1)[0] + "…"
-        if len(text) < 40:
-            continue
-
-        time_el = it.select_one("time")
-        date_str = time_el.get("datetime") if time_el else ""
-
-        posts.append({"snippet": text, "url": permalink, "date": date_str})
-
-    return posts
-
-async def fetch_thread_post_snippets(session, thread_url: str, max_pages: int = 2) -> list[dict]:
-    all_posts = []
-    for p in range(1, max_pages + 1):
-        # FIX: нужна форма /page-2/
-        url = thread_url if p == 1 else thread_url.rstrip("/") + f"/page-{p}/"
-        html = await fetch_forum_page(session, url)
-        if not html:
-            continue
-        all_posts.extend(extract_posts_from_thread_html(html, limit=12))
-        await asyncio.sleep(0.6)
-
-    seen = set()
-    uniq = []
-    for it in all_posts:
-        key = (it.get("url") or "", it["snippet"][:80])
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(it)
-    return uniq[:12]
-
-def extract_fish_keywords(user_text: str) -> list[str]:
-    t = normalize_text(user_text)
-    keys = []
-    for fish, arr in FISH_ALIASES.items():
-        if any(a in t for a in arr):
-            keys.append(fish)
-            keys.extend(arr[:2])
-    return list(dict.fromkeys(keys))
-
-async def get_rusfishing_context(user_query: str, places_cache: dict) -> str:
-    forum_url = find_forum_url_for_waterbody(user_query, places_cache)
-    if not forum_url:
-        logging.warning("RF_CTX no_forum_url query=%s", user_query)
+async def get_rusfishing_context(user_query: str) -> str:
+    # тут можно добавить легкую нормализацию запроса
+    query = _norm(user_query)
+    if not query:
         return ""
 
-    logging.warning("RF_CTX forum_url=%s query=%s", forum_url, user_query)
+    results = await vertex_search(query, page_size=7)
+    if not results:
+        return ""
 
-    fish_keys = extract_fish_keywords(user_query)
-    query_words = fish_keys if fish_keys else ["где", "стоит", "точки", "ям", "бровк", "залив"]
+    lines = []
+    links = []
+    for i, r in enumerate(results[:7], 1):
+        t = r.get("title") or "Без названия"
+        s = r.get("snippet") or ""
+        u = r.get("link") or ""
+        lines.append(f"{i}. {t} — {s}".strip())
+        if u:
+            links.append(u)
 
-    # FIX: timeout должен быть определён всегда
-    timeout = aiohttp.ClientTimeout(total=12)
+    # дедуп ссылок
+    uniq_links = []
+    seen = set()
+    for u in links:
+        if u in seen:
+            continue
+        seen.add(u)
+        uniq_links.append(u)
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        threads = await search_threads_in_forum(session, forum_url, query_words, pages=2)
-        cookies = parse_cookie_header(RUSFISHING_COOKIE)
-        
-        if cookies:
-            session.cookie_jar.update_cookies(cookies)
-
-        logging.warning("RF_CTX threads_found=%s", len(threads))
-
-        if not threads:
-            threads = await get_top_threads_in_forum(session, forum_url, limit=5)
-            logging.warning("RF_CTX fallback_threads_found=%s", len(threads))
-
-        if not threads:
-            return ""
-
-        picked = threads[:3]
-        snippets = []
-        source_links = []
-
-        for th in picked:
-            posts = await fetch_thread_post_snippets(session, th["url"], max_pages=1)
-
-            if th["url"] not in source_links:
-                source_links.append(th["url"])
-
-            for p in posts[:4]:
-                if p.get("url"):
-                    source_links.append(p["url"])
-                snippets.append(f"- {p['snippet']} ({p.get('url') or th['url']})")
-
-        snippets = snippets[:10]
-        source_links = list(dict.fromkeys(source_links))[:6]
-
-        return (
-            "ВЫЖИМКА С ФОРУМА (короткие фрагменты для фактов, проверяй по ссылкам):\n"
-            + "\n".join(snippets)
-            + "\n\nССЫЛКИ ДЛЯ ПРОВЕРКИ:\n"
-            + "\n".join(f"- {u}" for u in source_links)
-        )
+    return (
+        "ВЫЖИМКА С RUSFISHING (Vertex AI Search):\n"
+        + "\n".join(lines)
+        + "\n\nССЫЛКИ ДЛЯ ПРОВЕРКИ:\n"
+        + "\n".join(f"- {u}" for u in uniq_links[:7])
+    )
 
 
