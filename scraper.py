@@ -80,11 +80,16 @@ async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
 
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {
-    "query": query,
-    "pageSize": max(1, min(int(page_size), 10)),
-    "safeSearch": True,
-    "contentSearchSpec": {"snippetSpec": {"returnSnippet": True}},
+        "query": query,
+        "pageSize": max(1, min(int(page_size), 10)),
+        "safeSearch": True,
+        "contentSearchSpec": {
+            "snippetSpec": {
+                "returnSnippet": True
+            }
+        }
     }
+
 
     timeout = aiohttp.ClientTimeout(total=20)
 
@@ -115,22 +120,33 @@ def _parse_vertex_results(data: dict) -> List[Dict]:
             doc.get("title"),
             derived.get("htmlTitle"),
         )
+
         link = _pick_first(
             derived.get("link"),
             derived.get("url"),
             doc.get("id"),
         )
-        snippet = _pick_first(
-            derived.get("snippet"),
-            derived.get("description"),
-            derived.get("htmlSnippet"),
-        )
 
-        # если ссылок нет — всё равно добавим, но ссылка будет пустая
+        # 1) Пытаемся взять "правильный" сниппет из массива snippets
+        snippet = ""
+        snips = derived.get("snippets") or []
+        if isinstance(snips, list) and snips:
+            first = snips[0]
+            if isinstance(first, dict):
+                snippet = _pick_first(first.get("snippet"))
+
+        # 2) Fallback на старые поля
+        if not snippet:
+            snippet = _pick_first(
+                derived.get("snippet"),
+                derived.get("description"),
+                derived.get("htmlSnippet"),
+            )
+
         out.append({"title": title, "link": link, "snippet": snippet})
 
     return out
-
+    
 async def get_rusfishing_context(user_query: str) -> str:
     # тут можно добавить легкую нормализацию запроса
     query = _norm(user_query)
