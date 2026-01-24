@@ -79,7 +79,12 @@ async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
     ]
 
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"query": query, "pageSize": max(1, min(int(page_size), 25)), "safeSearch": True}
+    payload = {
+    "query": query,
+    "pageSize": max(1, min(int(page_size), 10)),
+    "safeSearch": True,
+    "contentSearchSpec": {"snippetSpec": {"returnSnippet": True}},
+    }
 
     timeout = aiohttp.ClientTimeout(total=20)
 
