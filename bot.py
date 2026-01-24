@@ -334,8 +334,12 @@ async def main_handler(message: Message):
         extra = river_context
 
         # 2) добавляем выдачу Vertex AI Search (форум)
+        logging.warning("VF: calling vertex, q=%s", query)
         try:
             forum_context = await scraper.get_rusfishing_context(query)
+            forum_context = await scraper.get_rusfishing_context(query)
+            logging.warning("VF: vertex_context_len=%s", len(forum_context or ""))
+
             if forum_context:
                 extra = (extra + "\n\n" + forum_context).strip() if extra else forum_context
         except Exception as e:
@@ -407,6 +411,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
