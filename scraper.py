@@ -32,6 +32,13 @@ GOOGLE_SA_JSON = (os.getenv("GOOGLE_SA_JSON") or "").strip()
 # access token cache
 _token_cache = {"token": None, "exp": 0}
 
+def _clean_snippet(s: str) -> str:
+    s = s or ""
+    s = re.sub(r"<[^>]+>", "", s)
+    s = s.replace("&nbsp;", " ").replace("&amp;", "&")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 def _get_access_token() -> str:
     now = int(time.time())
     if _token_cache["token"] and now < _token_cache["exp"]:
@@ -164,6 +171,7 @@ async def get_rusfishing_context(user_query: str) -> str:
         u = r.get("link") or ""
 
         # режем сниппет, чтобы не раздувать prompt
+        s = _clean_snippet(s)
         if len(s) > 240:
             s = s[:240].rsplit(" ", 1)[0] + "…"
 
