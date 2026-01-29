@@ -82,6 +82,19 @@ def extract_day_offset(text: str) -> int:
         return 1
     return 0
 
+def normalize_facts(f: Dict) -> Dict:
+    if not isinstance(f, dict):
+        return {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
+    f.setdefault("has_data", False)
+    f.setdefault("ice_or_open_water", "unknown")
+
+    if not isinstance(f.get("mentions"), list):
+        f["mentions"] = []
+    if not isinstance(f.get("key_notes"), list):
+        f["key_notes"] = []
+    if not isinstance(f.get("check_links"), list):
+        f["check_links"] = []
+    return f
 # =========================
 # WEATHER
 # =========================
@@ -382,6 +395,7 @@ async def cb_location_select(callback: CallbackQuery):
         await safe_send_markdown(callback.message, "⚠️ Ошибка обработки.")
 
 @dp.message((F.text & F.text.startswith("*")) | (F.caption & F.caption.startswith("*")))
+
 async def main_handler(message: Message):
     text = message.caption or message.text
     query = text[1:].strip()
@@ -442,66 +456,37 @@ async def main_handler(message: Message):
 
     # ===== fish_search =====
     elif intent == "fish_search":
-
+        forum_context = ""
         try:
-            forum_context = await scraper.get_rusfishing_context(query)  # один раз!
-            if forum_context:
-                # facts -> answer
-                facts = await extract_facts_from_rusfishing(query, forum_context)
-                facts = normalize_facts(facts)
-                def normalize_facts(f: Dict) -> Dict:
-                    if not isinstance(f, dict):
-                        return {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
-                    f.setdefault("has_data", False)
-                    f.setdefault("ice_or_open_water", "unknown")
-
-                    if not isinstance(f.get("mentions"), list):
-                        f["mentions"] = []
-                    if not isinstance(f.get("key_notes"), list):
-                        f["key_notes"] = []
-                    if not isinstance(f.get("check_links"), list):
-                        f["check_links"] = []
-                    return f
-
-
-                # зимой/в минус включаем "безопасный режим" если фактов мало
-                # (погоду сюда не тянем, но хотя бы по месяцу можно)
-                if river_context:
-                    facts.setdefault("key_notes", [])
-                    facts["key_notes"].insert(0, river_context)
-                    
-                month = datetime.date.today().month
-                is_winter = month in (12, 1, 2)
-                if is_winter and not facts.get("has_data"):
-                    facts.setdefault("key_notes", [])
-                    facts["key_notes"].append("Сезон: зима. Если по спиннингу нет подтверждений в отчетах — лучше не гадать.")
-                
-
-                # соберем ответ
-                answer = await render_answer_from_facts(
-                    user_query=query,
-                    facts=facts,
-                    weather="",
-                    intent="fish_search"
-                )
-                await safe_send_markdown(message, answer)
-                return
-
-            # если forum_context пустой
+            forum_context = await scraper.get_rusfishing_context(query)
         except Exception as e:
             logging.warning("Vertex forum context failed: %s", e)
 
-        # fallback если данных нет
-        facts = {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
-        answer = await render_answer_from_facts(query, facts, weather="", intent="fish_search")
+        facts = await extract_facts_from_rusfishing(query, forum_context)
+        facts = normalize_facts(facts)
+
+        if river_context:
+            facts["key_notes"].insert(0, river_context)
+
+        month = datetime.date.today().month
+        is_winter = month in (12, 1, 2)
+        if is_winter and not facts.get("has_data"):
+            facts["key_notes"].append("Сезон: зима. Если по спиннингу нет подтверждений в отчетах — лучше не гадать.")
+
+        answer = await render_answer_from_facts(
+            user_query=query,
+            facts=facts,
+            weather="",
+            intent="fish_search"
+        )
         await safe_send_markdown(message, answer)
         return
-
-    # ===== general =====
+        # ===== general =====
     else:
         resp = await get_chat_response(message.from_user.id, query, "", "", "general")
         await safe_send_markdown(message, resp)
         return
+
 
 # =========================
 # BACKGROUND TASKS
@@ -546,6 +531,8 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
+
 
 
 
