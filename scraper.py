@@ -14,12 +14,14 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 # =========================
 CACHE_FILE = "places_cache.json"
 
+
 def load_cache():
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
+
 
 # =========================
 # VERTEX AI SEARCH CONFIG
@@ -32,12 +34,29 @@ GOOGLE_SA_JSON = (os.getenv("GOOGLE_SA_JSON") or "").strip()
 # access token cache
 _token_cache = {"token": None, "exp": 0}
 
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
+
+
+def _pick_first(*vals: str) -> str:
+    for v in vals:
+        v = _norm(v)
+        if v:
+            return v
+    return ""
+
+
 def _clean_snippet(s: str) -> str:
     s = s or ""
+    # remove html tags (highlights etc.)
     s = re.sub(r"<[^>]+>", "", s)
+    # common entities
     s = s.replace("&nbsp;", " ").replace("&amp;", "&")
-    s = re.sub(r"\s+", " ", s).strip()
+    # normalize whitespace
+    s = _norm(s)
     return s
+
 
 def _get_access_token() -> str:
     now = int(time.time())
@@ -59,15 +78,6 @@ def _get_access_token() -> str:
     _token_cache["exp"] = now + 3000  # ~50 минут
     return token
 
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip()
-
-def _pick_first(*vals: str) -> str:
-    for v in vals:
-        v = _norm(v)
-        if v:
-            return v
-    return ""
 
 async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
     if not (VERTEX_PROJECT_ID and VERTEX_LOCATION and VERTEX_ENGINE_ID):
@@ -91,12 +101,11 @@ async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
         "pageSize": max(1, min(int(page_size), 10)),
         "safeSearch": True,
         "contentSearchSpec": {
-            "snippetSpec": {
-                "returnSnippet": True
-            }
-        }
+            "snippetSpec": {"returnSnippet": True},
+            # Опционально: extractive snippets/answers (часто дает более “фактологичный” текст)
+            "extractiveContentSpec": {"maxExtractiveAnswerCount": 1, "maxExtractiveSegmentCount": 1},
+        },
     }
-
 
     timeout = aiohttp.ClientTimeout(total=20)
 
@@ -115,6 +124,7 @@ async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
                 last_error = str(e)
 
     raise RuntimeError(f"Vertex search failed: {last_error}")
+
 
 def _parse_vertex_results(data: dict) -> List[Dict]:
     out = []
@@ -150,16 +160,19 @@ def _parse_vertex_results(data: dict) -> List[Dict]:
                 derived.get("htmlSnippet"),
             )
 
+        snippet = _clean_snippet(snippet)
+
         out.append({"title": title, "link": link, "snippet": snippet})
 
     return out
-    
+
+
 async def get_rusfishing_context(user_query: str) -> str:
     query = _norm(user_query)
     if not query:
         return ""
 
-    results = await vertex_search(query, page_size=5)  # было 7
+    results = await vertex_search(query, page_size=5)
     if not results:
         return ""
 
@@ -171,7 +184,6 @@ async def get_rusfishing_context(user_query: str) -> str:
         u = r.get("link") or ""
 
         # режем сниппет, чтобы не раздувать prompt
-        s = _clean_snippet(s)
         if len(s) > 240:
             s = s[:240].rsplit(" ", 1)[0] + "…"
 
@@ -199,6 +211,7 @@ async def get_rusfishing_context(user_query: str) -> str:
         text = text[:1300].rsplit("\n", 1)[0] + "\n…"
 
     return text
+
 
 
 
