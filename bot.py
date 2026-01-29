@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -17,7 +18,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from openai import AsyncOpenAI
-import scraper  # модуль: load_cache(), get_rusfishing_context()
+import scraper # модуль: load_cache(), get_rusfishing_context()
 
 # =========================
 # CONFIG
@@ -36,10 +37,31 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 user_histories: Dict[int, List[Dict]] = {}
 PLACES_CACHE = {}
+# callback_data store: short id -> payload
+LOC_CB_STORE: Dict[str, Dict] = {}
+LOC_CB_TTL = 60 * 60  # 1 час
 
 # =========================
 # UTILS
 # =========================
+def _make_loc_cb_id(user_id: int, river: str, place: str, day: int) -> str:
+    base = f"{user_id}|{river}|{place}|{day}|{int(time.time())}"
+    return str(abs(hash(base)) % 10**10)
+
+def _store_loc_cb(cb_id: str, payload: Dict):
+    payload = dict(payload)
+    payload["_ts"] = time.time()
+    LOC_CB_STORE[cb_id] = payload
+
+def _get_loc_cb(cb_id: str) -> Optional[Dict]:
+    item = LOC_CB_STORE.get(cb_id)
+    if not item:
+        return None
+    if time.time() - item.get("_ts", 0) > LOC_CB_TTL:
+        LOC_CB_STORE.pop(cb_id, None)
+        return None
+    return item
+
 async def safe_send_markdown(message: Message, text: str):
     try:
         await message.reply(text, parse_mode="Markdown")
@@ -168,7 +190,7 @@ PROMPT_ADVICE = """
 ДОКАЗАТЕЛЬНОСТЬ:
 - Если в "СПРАВКА ПО ВОДОЕМУ" есть "ВЫЖИМКА С RUSFISHING" — делай выводы в первую очередь из нее.
 - Не выдумывай деревни/ямы, которых нет в выжимке. Если данных мало — так и скажи и предложи 1–2 универсальных места (бровки/ямы/коряжник) без конкретных топонимов.
-- В конце добавь блок "Проверить на форуме:" и перечисли 3–5 ссылок из "ССЫЛКИ ДЛЯ ПРОВЕРКИ".
+- Если "ССЫЛКИ ДЛЯ ПРОВЕРКИ" не пустые — добавь блок "Проверить на форуме:" и 3–5 ссылок. Если ссылок нет — блок не добавляй.
 """
 
 async def analyze_user_query(text: str) -> dict:
@@ -194,6 +216,70 @@ async def analyze_user_query(text: str) -> dict:
     except Exception as e:
         logging.error(f"Analysis Error: {e}")
         return {"intent": "general", "location_name": ""}
+    
+FACTS_EXTRACTOR_SYSTEM = """
+Ты извлекаешь факты из текста "ВЫЖИМКА С RUSFISHING" и списка "ССЫЛКИ ДЛЯ ПРОВЕРКИ".
+Ничего не выдумывай.
+
+Верни JSON строго по схеме:
+{
+  "has_data": true/false,
+  "ice_or_open_water": "ice"|"open"|"unknown",
+  "mentions": [
+    {"species":"", "method":"", "bait":"", "activity":"", "notes":""}
+  ],
+  "key_notes": ["..."],
+  "check_links": ["https://..."]
+}
+
+Правила:
+- check_links бери ТОЛЬКО из блока "ССЫЛКИ ДЛЯ ПРОВЕРКИ" (если ссылок нет — []).
+- Если в выжимке нет явных фактов по клеву/уловам/снастям — has_data=false.
+- Если про лед/открытую воду ничего нет — "unknown".
+"""
+
+async def extract_facts_from_rusfishing(user_query: str, forum_context: str) -> Dict:
+    if not forum_context:
+        return {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
+
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": FACTS_EXTRACTOR_SYSTEM},
+                {"role": "user", "content": f"ЗАПРОС: {user_query}\n\nТЕКСТ:\n{forum_context}"},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0
+        )
+        return json.loads(resp.choices[0].message.content)
+    except Exception as e:
+        logging.warning("Facts extraction failed: %s", e)
+        return {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
+    
+ANSWER_SYSTEM = """
+Ты опытный рыбак (форумный стиль), но строго опираешься на факты из JSON.
+Если фактов нет — честно скажи, что подтверждений по отчетам нет, и перейди в "безопасный режим" (универсальные советы без брендов и без конкретных топонимов).
+Никогда не придумывай приманки/места/виды рыб, которых нет в facts.
+
+Правило ссылок:
+- Блок "Проверить на форуме:" добавляй ТОЛЬКО если facts.check_links не пустой (3–5 ссылок).
+В конце: "НХНЧ!".
+"""
+
+async def render_answer_from_facts(user_query: str, facts: Dict, weather: str, intent: str) -> str:
+    # weather можно добавлять только для forecast; для fish_search обычно пусто
+    payload = {"query": user_query, "intent": intent, "weather": weather or "", "facts": facts}
+
+    resp = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": ANSWER_SYSTEM},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+        temperature=0.2 if intent in ("forecast", "fish_search") else 0.7
+    )
+    return resp.choices[0].message.content
 
 async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str,
                             intent: str, extra_context: str = "") -> str:
@@ -232,10 +318,11 @@ async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str
         user_histories[user_id] = [user_histories[user_id][0]] + user_histories[user_id][-6:]
 
     try:
+        temp = 0.2 if intent in ("forecast", "fish_search") else 0.7
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=user_histories[user_id],
-            temperature=0.7
+            temperature=temp
         )
         answer = response.choices[0].message.content
         user_histories[user_id].append({"role": "assistant", "content": answer})
@@ -256,25 +343,39 @@ async def cb_location_select(callback: CallbackQuery):
     try:
         await callback.answer()
         parts = callback.data.split(":")
-        if len(parts) < 4:
+        if len(parts) != 2:
             return
 
-        _, river, place, day_s = parts
-        day = int(day_s)
+        cb_id = parts[1]
+        payload = _get_loc_cb(cb_id)
+        if not payload:
+            await safe_send_markdown(callback.message, "⚠️ Кнопка устарела. Нажми запрос ещё раз.")
+            return
+
+        river = payload["river"]
+        place = payload["place"]
+        day = int(payload["day"])
+
 
         await safe_edit_markdown(callback.message, f"✅ Выбрано: {place} ({river}). Анализирую...")
 
         weather_task = asyncio.create_task(get_weather_forecast(place, day))
         weather = await weather_task or f"⚠️ Погода для {place} не найдена."
 
-        response = await get_chat_response(
-            callback.from_user.id,
-            f"Клев на {river} в районе {place}",
-            weather,
-            river,
-            "forecast"
+        forum_context = ""
+        try:
+            forum_context = await scraper.get_rusfishing_context(f"{river} {place} клев")
+        except Exception as e:
+            logging.warning("Vertex forum context failed: %s", e)
+
+        facts = await extract_facts_from_rusfishing(f"Клев на {river} в районе {place}", forum_context)
+        answer = await render_answer_from_facts(
+            user_query=f"Клев на {river} в районе {place}",
+            facts=facts,
+            weather=weather or "",
+            intent="forecast"
         )
-        await safe_send_markdown(callback.message, response)
+        await safe_send_markdown(callback.message, answer)
 
     except Exception:
         logging.exception("Error in callback")
@@ -313,7 +414,9 @@ async def main_handler(message: Message):
             locations = PLACES_CACHE[found_river_key].get("locations", [])
             kb = InlineKeyboardBuilder()
             for loc in locations[:14]:
-                kb.button(text=loc, callback_data=f"loc:{found_river_key}:{loc}:{day_offset}")
+                cb_id = _make_loc_cb_id(message.from_user.id, found_river_key, loc, day_offset)
+                _store_loc_cb(cb_id, {"river": found_river_key, "place": loc, "day": day_offset})
+                kb.button(text=loc, callback_data=f"loc:{cb_id}")
             kb.adjust(2)
 
             await message.reply(
@@ -324,41 +427,74 @@ async def main_handler(message: Message):
             return
 
         weather = await get_weather_forecast(loc_name, day_offset)
-        resp = await get_chat_response(message.from_user.id, query, weather or "", loc_name, "forecast")
-        await safe_send_markdown(message, resp)
-        return
 
-    # ===== fish_search =====
-    elif intent == "fish_search":
-        # 1) берём “легкий” контекст из кэша
-        extra = river_context
-
-        # 2) добавляем выдачу Vertex AI Search (форум)
+        forum_context = ""
         try:
             forum_context = await scraper.get_rusfishing_context(query)
-            forum_context = await scraper.get_rusfishing_context(query)
-            logging.warning("VF: vertex_context_len=%s", len(forum_context or ""))
-
-            if forum_context:
-                extra = (extra + "\n\n" + forum_context).strip() if extra else forum_context
         except Exception as e:
             logging.warning("Vertex forum context failed: %s", e)
 
-        if not extra:
-            extra = (
-                "Данных по этому водоему пока мало. "
-                "Универсально: смотри бровки, русловые ямы, коряжник, выходы из ям, обратки."
-            )
+        facts = await extract_facts_from_rusfishing(query, forum_context)
+        answer = await render_answer_from_facts(query, facts, weather=weather or "", intent="forecast")
+        await safe_send_markdown(message, answer)
+        return
 
-        response = await get_chat_response(
-            message.from_user.id,
-            query,
-            weather="",
-            loc_name=loc_name,
-            intent="fish_search",
-            extra_context=extra
-        )
-        await safe_send_markdown(message, response)
+
+    # ===== fish_search =====
+    elif intent == "fish_search":
+
+        try:
+            forum_context = await scraper.get_rusfishing_context(query)  # один раз!
+            if forum_context:
+                # facts -> answer
+                facts = await extract_facts_from_rusfishing(query, forum_context)
+                facts = normalize_facts(facts)
+                def normalize_facts(f: Dict) -> Dict:
+                    if not isinstance(f, dict):
+                        return {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
+                    f.setdefault("has_data", False)
+                    f.setdefault("ice_or_open_water", "unknown")
+
+                    if not isinstance(f.get("mentions"), list):
+                        f["mentions"] = []
+                    if not isinstance(f.get("key_notes"), list):
+                        f["key_notes"] = []
+                    if not isinstance(f.get("check_links"), list):
+                        f["check_links"] = []
+                    return f
+
+
+                # зимой/в минус включаем "безопасный режим" если фактов мало
+                # (погоду сюда не тянем, но хотя бы по месяцу можно)
+                if river_context:
+                    facts.setdefault("key_notes", [])
+                    facts["key_notes"].insert(0, river_context)
+                    
+                month = datetime.date.today().month
+                is_winter = month in (12, 1, 2)
+                if is_winter and not facts.get("has_data"):
+                    facts.setdefault("key_notes", [])
+                    facts["key_notes"].append("Сезон: зима. Если по спиннингу нет подтверждений в отчетах — лучше не гадать.")
+                
+
+                # соберем ответ
+                answer = await render_answer_from_facts(
+                    user_query=query,
+                    facts=facts,
+                    weather="",
+                    intent="fish_search"
+                )
+                await safe_send_markdown(message, answer)
+                return
+
+            # если forum_context пустой
+        except Exception as e:
+            logging.warning("Vertex forum context failed: %s", e)
+
+        # fallback если данных нет
+        facts = {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
+        answer = await render_answer_from_facts(query, facts, weather="", intent="fish_search")
+        await safe_send_markdown(message, answer)
         return
 
     # ===== general =====
