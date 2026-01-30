@@ -27,7 +27,7 @@ def load_cache():
 # HELPERS
 # =========================
 def _norm(s: str) -> str:
-    # важно: \s+ (а не \\s+) — иначе пробелы не нормализуются
+    # важно: \s+ — искать все пробельные символы
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 
@@ -41,22 +41,21 @@ def _pick_first(*vals: str) -> str:
 
 def _clean_snippet(s: str) -> str:
     s = s or ""
-    # highlight в snippets приходит как HTML-теги
     s = re.sub(r"<[^>]+>", "", s)
     s = s.replace("&nbsp;", " ").replace("&amp;", "&")
     return _norm(s)
 
 
 def _extract_page_num(url: str) -> int:
-    # важно: (\d+) (а не (\\d+)) — иначе page-123 не распарсится и фильтр свежести не сработает
+    # вытаскиваем номер page-XXXX из URL, если он есть
     m = re.search(r"/page-(\d+)", url or "")
     return int(m.group(1)) if m else 0
 
 
 def _prefer_newer_pages(results: List[Dict], limit: int = 5) -> List[Dict]:
     """
-    Если выдача содержит ссылки вида .../page-XXXX, оставляем самые "свежие"
-    (по максимальному номеру страницы). Иначе — просто top N как пришло.
+    Если среди ссылок есть page-XXXX, оставляем результаты
+    с максимальными номерами страниц (считаем их более свежими).
     """
     with_pages = [r for r in results if _extract_page_num(r.get("link", "")) > 0]
     if not with_pages:
@@ -74,7 +73,6 @@ VERTEX_LOCATION = (os.getenv("VERTEX_LOCATION") or "global").strip()
 VERTEX_ENGINE_ID = (os.getenv("VERTEX_ENGINE_ID") or "").strip()
 GOOGLE_SA_JSON = (os.getenv("GOOGLE_SA_JSON") or "").strip()
 
-# access token cache
 _token_cache = {"token": None, "exp": 0}
 
 
@@ -105,7 +103,6 @@ async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
 
     token = _get_access_token()
 
-    # Пробуем оба servingConfig (часто встречается default_search / default_serving_config)
     serving_configs = [
         f"projects/{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}/collections/default_collection"
         f"/engines/{VERTEX_ENGINE_ID}/servingConfigs/default_search",
@@ -119,10 +116,11 @@ async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
         "pageSize": max(1, min(int(page_size), 10)),
         "safeSearch": True,
         "contentSearchSpec": {
-            # snippets возвращаются в derivedStructData.snippets [web:36]
-            "snippetSpec": {"returnSnippet": True},  # [web:36]
-            # extractive опционально, иногда помогает "фактологичности" [web:36]
-            "extractiveContentSpec": {"maxExtractiveAnswerCount": 1, "maxExtractiveSegmentCount": 1},  # [web:36]
+            "snippetSpec": {"returnSnippet": True},
+            "extractiveContentSpec": {
+                "maxExtractiveAnswerCount": 1,
+                "maxExtractiveSegmentCount": 1
+            },
         },
     }
 
@@ -163,7 +161,6 @@ def _parse_vertex_results(data: dict) -> List[Dict]:
             doc.get("id"),
         )
 
-        # Сниппеты обычно лежат в derivedStructData.snippets[0].snippet [web:36]
         snippet = ""
         snips = derived.get("snippets") or []
         if isinstance(snips, list) and snips:
@@ -171,7 +168,6 @@ def _parse_vertex_results(data: dict) -> List[Dict]:
             if isinstance(first, dict):
                 snippet = _pick_first(first.get("snippet"))
 
-        # Fallback на старые поля
         if not snippet:
             snippet = _pick_first(
                 derived.get("snippet"),
@@ -199,7 +195,7 @@ async def get_rusfishing_context(user_query: str) -> str:
     if not results:
         return ""
 
-    # Фильтр "не лезть глубоко": предпочитаем ссылки с максимальным page-XXXX
+    # Предпочитаем более свежие страницы ветки
     results = _prefer_newer_pages(results, limit=5)
 
     lines = []
@@ -210,7 +206,6 @@ async def get_rusfishing_context(user_query: str) -> str:
         s = r.get("snippet") or ""
         u = r.get("link") or ""
 
-        # режем сниппет, чтобы не раздувать prompt
         if len(s) > 240:
             s = s[:240].rsplit(" ", 1)[0] + "…"
 
@@ -218,7 +213,6 @@ async def get_rusfishing_context(user_query: str) -> str:
         if u:
             links.append(u)
 
-    # uniq links
     uniq_links = []
     seen = set()
     for u in links:
@@ -234,11 +228,12 @@ async def get_rusfishing_context(user_query: str) -> str:
         + "\n".join(f"- {u}" for u in uniq_links[:5])
     )
 
-    # общий лимит размера контекста
     if len(text) > 1300:
         text = text[:1300].rsplit("\n", 1)[0] + "\n…"
 
+    logging.warning("RF links: %s", uniq_links[:5])
     return text
+
 
 
 
