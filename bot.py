@@ -18,7 +18,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from openai import AsyncOpenAI
-import scraper  # load_cache(), get_rusfishing_context()
+import scraper # модуль: load_cache(), get_rusfishing_context()
 
 # =========================
 # CONFIG
@@ -36,10 +36,10 @@ dp = Dispatcher()
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 user_histories: Dict[int, List[Dict]] = {}
-PLACES_CACHE: Dict[str, Dict] = {}
+PLACES_CACHE = {}
+# callback_data store: short id -> payload
 LOC_CB_STORE: Dict[str, Dict] = {}
 LOC_CB_TTL = 60 * 60  # 1 час
-
 
 # =========================
 # UTILS
@@ -48,12 +48,10 @@ def _make_loc_cb_id(user_id: int, river: str, place: str, day: int) -> str:
     base = f"{user_id}|{river}|{place}|{day}|{int(time.time())}"
     return str(abs(hash(base)) % 10**10)
 
-
 def _store_loc_cb(cb_id: str, payload: Dict):
     payload = dict(payload)
     payload["_ts"] = time.time()
     LOC_CB_STORE[cb_id] = payload
-
 
 def _get_loc_cb(cb_id: str) -> Optional[Dict]:
     item = LOC_CB_STORE.get(cb_id)
@@ -64,20 +62,17 @@ def _get_loc_cb(cb_id: str) -> Optional[Dict]:
         return None
     return item
 
-
 async def safe_send_markdown(message: Message, text: str):
     try:
         await message.reply(text, parse_mode="Markdown")
     except TelegramBadRequest:
         await message.reply(text)
 
-
 async def safe_edit_markdown(message: Message, text: str, reply_markup=None):
     try:
         await message.edit_text(text, parse_mode="Markdown", reply_markup=reply_markup)
     except TelegramBadRequest:
         await message.edit_text(text, reply_markup=reply_markup)
-
 
 def extract_day_offset(text: str) -> int:
     t = (text or "").lower()
@@ -87,17 +82,9 @@ def extract_day_offset(text: str) -> int:
         return 1
     return 0
 
-
 def normalize_facts(f: Dict) -> Dict:
     if not isinstance(f, dict):
-        return {
-            "has_data": False,
-            "ice_or_open_water": "unknown",
-            "mentions": [],
-            "key_notes": [],
-            "check_links": [],
-        }
-
+        return {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
     f.setdefault("has_data", False)
     f.setdefault("ice_or_open_water", "unknown")
 
@@ -107,27 +94,15 @@ def normalize_facts(f: Dict) -> Dict:
         f["key_notes"] = []
     if not isinstance(f.get("check_links"), list):
         f["check_links"] = []
-
     return f
-
-
 # =========================
 # WEATHER
 # =========================
 def get_moon_phase() -> str:
-    phases = [
-        "🌑 Новолуние",
-        "🌒 Растущая",
-        "🌓 1-я четверть",
-        "🌔 Растущая",
-        "🌕 Полнолуние",
-        "🌖 Убывающая",
-        "🌗 Последняя четверть",
-        "🌘 Старая",
-    ]
+    phases = ["🌑 Новолуние", "🌒 Растущая", "🌓 1-я четверть", "🌔 Растущая",
+              "🌕 Полнолуние", "🌖 Убывающая", "🌗 Последняя четверть", "🌘 Старая"]
     days = (datetime.date.today() - datetime.date(2000, 1, 6)).days
     return phases[int(((days % 29.53) / 29.53) * 8) % 8]
-
 
 async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
     if not OPENWEATHER_API_KEY or not city:
@@ -138,15 +113,11 @@ async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
     queries = [
         f"{city}, Moscow Oblast, RU",
         f"{city}, RU",
-        city,
+        city
     ]
 
     url = "https://api.openweathermap.org/data/2.5/forecast"
-    base_params = {
-        "appid": OPENWEATHER_API_KEY,
-        "units": "metric",
-        "lang": "ru",
-    }
+    base_params = {"appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"}
 
     timeout = aiohttp.ClientTimeout(total=5)
     data = None
@@ -186,29 +157,63 @@ async def get_weather_forecast(city: str, day_offset: int) -> Optional[str]:
     desc = best["weather"][0]["description"]
     moon = get_moon_phase()
 
-    ice_hint = "ice_likely" if temp <= -2 else "unknown"
-
     return (
         f"📍 {city} | {target_str}\n"
         f"🌡 Темп: {temp:.1f}°C ({desc})\n"
         f"🔽 Давление: {pressure} мм рт.ст.\n"
         f"💨 Ветер: {wind} м/с\n"
-        f"🌙 Луна: {moon}\n"
-        f"ICE_HINT: {ice_hint}"
+        f"🌙 Луна: {moon}"
     )
-
 
 # =========================
 # AI LOGIC
 # =========================
+PROMPT_FORECAST = """
+Ты — ЭЛИТНЫЙ РЫБОЛОВНЫЙ ГИД (Стаж 30 лет).
+Дай прогноз, используя данные Русфишинга и погоду.
+
+ШАБЛОН ОТВЕТА:
+🌥 **АНАЛИЗ ПОГОДЫ С ДАННЫМИ:** ...
+🐟 **КТО И КАК КЛЮЕТ:**
+> **Щука:** ...
+> **Судак:** ...
+> **Жерех:** ...
+> **Окунь:** ...
+⚙️ **СНАСТИ И ПРИМАНКИ:** ...
+🎯 **ТАКТИКА ПОИСКА:** ...
+---
+Ни хвоста, ни чешуи! 🎣
+"""
+
+ANSWER_SYSTEM_GENERAL = """
+Ты — опытный рыболов‑практик и активный участник рыболовного форума.
+
+ТВОЯ ЗАДАЧА:
+- Понятно и по‑товарищески отвечать на общий вопрос рыбака.
+- НЕ фантазировать про конкретные места и секретные точки, если об этом явно не спрашивают.
+- Давать практичные советы: как думать головой, как анализировать водоём и условия.
+
+ПРАВИЛА:
+- Пиши простым живым языком, как в хорошем отчёте на форуме.
+- Не придумывай запреты и законы — для юридических вопросов советуй смотреть официальные правила рыболовства по региону.
+- Если вопрос вообще не про рыбалку — отвечай честно, в рамках здравого смысла, но без выдуманных фактов.
+
+СТРУКТУРА:
+1) Коротко определи, что человек спрашивает.
+2) Дай 3–6 конкретных советов по теме (оборудование, тактика, ошибки, на что обратить внимание).
+3) Если уместно — предложи, какие уточняющие вопросы он может задать, чтобы получить более точный ответ.
+
+Не нужно ссылок и JSON, просто человеческий ответ. В конце можешь написать "НХНЧ!", если вопрос всё‑таки про рыбалку.
+"""
+
 async def analyze_user_query(text: str) -> dict:
     system = """
 Ты — классификатор запросов.
 1. "forecast" — вопросы про КЛЕВ на конкретную дату/время ("клюет ли завтра", "прогноз на выходные", "клев на Оке").
-2. "fish_search" — вопросы КАК/ГДЕ ловить, тактика, снасти ("как ловить жереха", "на что берет щука", "где искать судака", "отчет", "отчёт").
+2. "fish_search" — вопросы КАК/ГДЕ ловить, тактика, снасти ("как ловить жереха", "на что берет щука", "где искать судака").
 3. "general" — остальное.
 
-Верни JSON: {"intent": "...", "location_name": "..."}.
+Верни JSON: {"intent": "...", "location_name": "..."}
 """
     try:
         response = await client.chat.completions.create(
@@ -218,19 +223,18 @@ async def analyze_user_query(text: str) -> dict:
                 {"role": "user", "content": text},
             ],
             response_format={"type": "json_object"},
-            temperature=0,
+            temperature=0
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         logging.error(f"Analysis Error: {e}")
         return {"intent": "general", "location_name": ""}
-
-
+    
 FACTS_EXTRACTOR_SYSTEM = """
 Ты извлекаешь факты из текста "ВЫЖИМКА С RUSFISHING" и списка "ССЫЛКИ ДЛЯ ПРОВЕРКИ".
 Ничего не выдумывай.
 
-JSON-схема:
+Верни JSON строго по схеме:
 {
   "has_data": true/false,
   "ice_or_open_water": "ice"|"open"|"unknown",
@@ -245,96 +249,102 @@ JSON-схема:
 - check_links бери ТОЛЬКО из блока "ССЫЛКИ ДЛЯ ПРОВЕРКИ" (если ссылок нет — []).
 - Если в выжимке нет явных фактов по клеву/уловам/снастям — has_data=false.
 - Если про лед/открытую воду ничего нет — "unknown".
-- Если нет явных признаков свежести (дата/вчера/сегодня/неделя/месяц), считай данные не свежими и не делай уверенных выводов "сейчас"/"завтра".
+- Если в сниппете нет признаков свежести (дата/вчера/сегодня/январь/зима), не делай уверенный вывод о ‘сейчас/завтра’, отмечай как неподтвержденное.
 """
-
 
 async def extract_facts_from_rusfishing(user_query: str, forum_context: str) -> Dict:
     if not forum_context:
-        return {
-            "has_data": False,
-            "ice_or_open_water": "unknown",
-            "mentions": [],
-            "key_notes": [],
-            "check_links": [],
-        }
+        return {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
 
     try:
         resp = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": FACTS_EXTRACTOR_SYSTEM},
-                {
-                    "role": "user",
-                    "content": f"ЗАПРОС: {user_query}\n\nТЕКСТ:\n{forum_context}",
-                },
+                {"role": "user", "content": f"ЗАПРОС: {user_query}\n\nТЕКСТ:\n{forum_context}"},
             ],
             response_format={"type": "json_object"},
-            temperature=0,
+            temperature=0
         )
-        data = json.loads(resp.choices[0].message.content)
-        return normalize_facts(data)
+        return json.loads(resp.choices[0].message.content)
     except Exception as e:
         logging.warning("Facts extraction failed: %s", e)
-        return {
-            "has_data": False,
-            "ice_or_open_water": "unknown",
-            "mentions": [],
-            "key_notes": [],
-            "check_links": [],
-        }
-
-
+        return {"has_data": False, "ice_or_open_water": "unknown", "mentions": [], "key_notes": [], "check_links": []}
+    
 ANSWER_SYSTEM = """
-Ты опытный рыбак (форумный стиль), но строго опираешься на факты из JSON (поле facts).
-Если фактов нет — честно скажи, что подтверждений по отчетам нет, и перейди в "безопасный режим"
-(универсальные советы без брендов и без конкретных топонимов).
+Ты опытный рыбак (форумный стиль), но строго опираешься на факты из JSON.
+Если фактов нет — честно скажи, что подтверждений по отчетам нет, и перейди в "безопасный режим" (универсальные советы без брендов и без конкретных топонимов).
 Никогда не придумывай приманки/места/виды рыб, которых нет в facts.
 
 Правило ссылок:
 - Блок "Проверить на форуме:" добавляй ТОЛЬКО если facts.check_links не пустой (3–5 ссылок).
 В конце: "НХНЧ!".
 """
-
 ANSWER_SYSTEM_FORECAST = """
 Ты даешь прогноз клева для спиннинга/фидера/поплавка на указанную дату.
-У тебя есть:
-- weather (строка с температурой, давлением, ветром, фазой луны и ICE_HINT),
-- facts (JSON по отчетам с форума).
 
-Структура ответа (строго соблюдай):
+У ТЕБЯ ЕСТЬ:
+- weather: строка с температурой, давлением, ветром, фазой луны и ICE_HINT.
+- facts: JSON по отчетам с форума (без точных дат, только текст и ссылки).
+- текущий месяц/сезон (предположи из календаря: зима — декабрь/январь/февраль, весна — март/апрель/май, лето — июнь/июль/август, осень — сентябрь/октябрь/ноябрь).
+
+ОГРАНИЧЕНИЯ ПО ВРЕМЕНИ:
+- У тебя НЕТ точной даты отчёта. НЕЛЬЗЯ уверенно говорить «по свежим отчётам сейчас клюет так‑то», если в тексте явно не сказано «вчера», «сегодня», «на этих выходных», «в январе 2026» и т.п.
+- Если в facts нет явной формулировки, что отчёт свежий, считай, что отчёты МОГУТ быть старыми.
+- Старые отчёты используй только как фон: какие виды рыбы вообще бывают, какие снасти/подходы встречаются, но НЕ как прямой сигнал «сейчас клюет».
+
+ЛОГИКА:
+1) Определи сезон (зима/весна/лето/осень) по текущей дате.
+2) Проанализируй weather:
+   - Температура, давление, ветер, фаза луны.
+   - ICE_HINT:
+       - "ice_likely" — есть вероятность льда.
+       - "unknown" — лед не понятен.
+3) Проанализируй facts:
+   - Если facts.has_data=false — по факту нет подтверждений с форума.
+   - Если facts.has_data=true, но в текстах нет явных признаков свежести — считай данные «историческими», а не «прямо сейчас».
+   - Никогда не придумывай конкретное время («вчера», «неделю назад») — у тебя его нет.
+
+СТРУКТУРА ОТВЕТА (СТРОГО):
+
 1) Погода:
-   - Температура, давление, ветер, фаза луны (из weather).
-   - ICE_HINT: если значение "ice_likely" — значит лед вероятен.
+   - Кратко: температура, давление, ветер, фаза луны (всё только из weather).
+   - ICE_HINT: объясни словами, означает ли это вероятность льда.
 
 2) Прогноз клева:
-   - Оценка: "плохой", "ниже среднего", "средний", "нормальный", "хороший".
-   - Минимум 2 причины: по погоде/сезону и по отчетам (если есть has_data=true).
-   - Если данных мало или старые — явно напиши, что прогноз осторожный.
+   - Оценка: "плохой", "ниже среднего", "средний", "нормальный" или "хороший".
+   - Основания:
+       - Всегда укажи влияние погоды и сезона (например: сильный мороз, оттепель, высокая/низкая вода, ветер).
+       - Если facts.has_data=true и в текстах есть намёки на «последние отчёты», «зимой», «в январе», «на этих выходных» — используй это как усиление прогноза.
+       - Во всех остальных случаях прямо напиши, что отчёты могут быть старыми, и прогноз осторожный.
 
 3) Что делать:
-   - 2–4 конкретных действия: где искать рыбу (бровки, ямы, коряжник), какая снасть/подход.
-   - ЕСЛИ ICE_HINT=ice_likely или facts.ice_or_open_water == "ice":
-       НЕ советуй спиннинг, джиг, микроджиг. Говори про зимние снасти (мормышка, балансир, жерлицы)
-       или предложи уточнить, есть ли открытая вода.
+   - Дай 2–4 конкретных действия: где искать рыбу (бровки, ямы, коряжник, свалы, перекаты) и какой общий подход по снастям.
+   - ЕСЛИ ICE_HINT = "ice_likely" ИЛИ facts.ice_or_open_water == "ice":
+       - НЕ советуй спиннинг, джиг, микроджиг, воблеры и т.п.
+       - Говори про зимние снасти: мормышка, балансир, блесна, жерлицы/ставки.
+       - Если не уверен, есть ли открытая вода, предложи человеку уточнить это на месте или в свежих отчётах.
+   - ЕСЛИ сезон = зима и НЕТ явных подтверждений, что ловят по открытой воде:
+       - Также избегай советов по спиннингу; лучше делай акцент на подлёдной ловле или честно пиши, что без свежих отчётов по спиннингу лучше не гадать.
 
 4) Ссылки:
-   - Блок "Проверить на форуме:" добавляй ТОЛЬКО если facts.check_links не пустой (3–5 штук).
-   - Если ссылок нет — этот блок пропусти.
+   - Блок "Проверить на форуме:" добавляй ТОЛЬКО если facts.check_links не пустой.
+   - Ссылок 1–5, без комментариев, просто список.
+   - Явно не говори, что это «свежие» ссылки — у тебя нет даты.
 
-Всегда пиши в конце: "НХНЧ!".
+В КОНЦЕ всегда пиши "НХНЧ!".
 """
 
-
 async def render_answer_from_facts(user_query: str, facts: Dict, weather: str, intent: str) -> str:
-    payload = {
-        "query": user_query,
-        "intent": intent,
-        "weather": weather or "",
-        "facts": facts,
-    }
+    payload = {"query": user_query, "intent": intent, "weather": weather or "", "facts": facts}
 
-    system_text = ANSWER_SYSTEM_FORECAST if intent == "forecast" else ANSWER_SYSTEM
+    if intent == "forecast":
+        system_text = ANSWER_SYSTEM_FORECAST
+    elif intent == "fish_search":
+        system_text = ANSWER_SYSTEM_FISH_SEARCH
+    else:
+        system_text = ANSWER_SYSTEM_GENERAL
+
 
     resp = await client.chat.completions.create(
         model="gpt-4o-mini",
@@ -342,10 +352,9 @@ async def render_answer_from_facts(user_query: str, facts: Dict, weather: str, i
             {"role": "system", "content": system_text},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
-        temperature=0.2 if intent in ("forecast", "fish_search") else 0.7,
+        temperature=0.2 if intent in ("forecast", "fish_search") else 0.7
     )
     return resp.choices[0].message.content
-
 
 async def get_chat_response(
     user_id: int,
@@ -355,7 +364,12 @@ async def get_chat_response(
     intent: str,
     extra_context: str = "",
 ) -> str:
-    system_text = ANSWER_SYSTEM_FORECAST if intent == "forecast" else ANSWER_SYSTEM
+    if intent == "forecast":
+        system_text = ANSWER_SYSTEM_FORECAST
+    elif intent == "fish_search":
+        system_text = ANSWER_SYSTEM_FISH_SEARCH
+    else:
+        system_text = ANSWER_SYSTEM_GENERAL  # сюда попадает general
 
     user_content = f"ВОПРОС ПОЛЬЗОВАТЕЛЯ: {text}\n"
 
@@ -370,6 +384,9 @@ async def get_chat_response(
     else:
         user_content += "\n(Дай экспертный совет, погоду расписывать не нужно, если она не критична)"
 
+    # дальше твой код работы с user_histories без изменений
+
+
     if user_id not in user_histories:
         user_histories[user_id] = []
 
@@ -380,10 +397,7 @@ async def get_chat_response(
             break
 
     if sys_msg_idx >= 0:
-        user_histories[user_id][sys_msg_idx] = {
-            "role": "system",
-            "content": system_text,
-        }
+        user_histories[user_id][sys_msg_idx] = {"role": "system", "content": system_text}
     else:
         user_histories[user_id].insert(0, {"role": "system", "content": system_text})
 
@@ -397,7 +411,7 @@ async def get_chat_response(
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=user_histories[user_id],
-            temperature=temp,
+            temperature=temp
         )
         answer = response.choices[0].message.content
         user_histories[user_id].append({"role": "assistant", "content": answer})
@@ -406,17 +420,12 @@ async def get_chat_response(
         logging.error(f"AI Error: {e}")
         return "⚠️ ИИ задумался. Попробуй еще раз."
 
-
 # =========================
 # HANDLERS
 # =========================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer(
-        "👋 Привет! Я использую базу Русфишинга.\n"
-        "Напиши: `*клев на Оке` или `*как ловить щуку на Пахре`"
-    )
-
+    await message.answer("👋 Привет! Я использую базу Русфишинга.\nНапиши: `*клев на Оке` или `*как ловить щуку на Пахре`")
 
 @dp.callback_query(F.data.startswith("loc:"))
 async def cb_location_select(callback: CallbackQuery):
@@ -436,34 +445,25 @@ async def cb_location_select(callback: CallbackQuery):
         place = payload["place"]
         day = int(payload["day"])
 
-        await safe_edit_markdown(
-            callback.message,
-            f"✅ Выбрано: {place} ({river}). Анализирую...",
-        )
 
-        weather = await get_weather_forecast(place, day)
-        if not weather:
-            weather = f"⚠️ Погода для {place} не найдена."
+        await safe_edit_markdown(callback.message, f"✅ Выбрано: {place} ({river}). Анализирую...")
 
-        search_q = f"{river} {place} отчет сегодня январь"
+        weather_task = asyncio.create_task(get_weather_forecast(place, day))
+        weather = await weather_task or f"⚠️ Погода для {place} не найдена."
+
         forum_context = ""
         try:
+            search_q = f"{river} {place} отчет сегодня январь"
             forum_context = await scraper.get_rusfishing_context(search_q)
         except Exception as e:
             logging.warning("Vertex forum context failed: %s", e)
 
-        facts = await extract_facts_from_rusfishing(
-            f"Клев на {river} в районе {place}",
-            forum_context,
-        )
-        logging.warning("FACTS has_data=%s links=%s",
-                        facts.get("has_data"), len(facts.get("check_links", [])))
-
+        facts = await extract_facts_from_rusfishing(f"Клев на {river} в районе {place}", forum_context)
         answer = await render_answer_from_facts(
             user_query=f"Клев на {river} в районе {place}",
             facts=facts,
             weather=weather or "",
-            intent="forecast",
+            intent="forecast"
         )
         await safe_send_markdown(callback.message, answer)
 
@@ -471,8 +471,51 @@ async def cb_location_select(callback: CallbackQuery):
         logging.exception("Error in callback")
         await safe_send_markdown(callback.message, "⚠️ Ошибка обработки.")
 
-
 @dp.message((F.text & F.text.startswith("*")) | (F.caption & F.caption.startswith("*")))
+
+ANSWER_SYSTEM_FISH_SEARCH = """
+Ты опытный рыбак с форума, но строго опираешься на JSON facts и общие знания по сезону.
+
+У ТЕБЯ ЕСТЬ:
+- facts: JSON с mentions (виды рыб, методы, приманки, заметки), key_notes и check_links.
+- текущий сезон по календарю (зима/весна/лето/осень).
+- НЕТ точных дат отчётов, поэтому ты НЕ знаешь, когда именно они были написаны.
+
+ОГРАНИЧЕНИЯ ПО ВРЕМЕНИ:
+- Если в текстах нет явных указаний «зимой», «в январе», «по первому льду», «в глухозимье», «летом», «в июле» и т.п. — считай, что отчёты могут быть старыми и не привязывай их жёстко к текущему моменту.
+- Используй такие отчёты для понимания типичных видов рыбы и приманок, но не говори «сейчас клюет так‑то» на их основе.
+
+СЕЗОННАЯ ЛОГИКА:
+- Если сейчас зима (декабрь/январь/февраль) и в facts НЕТ явных зимних отчётов по спиннингу:
+    - НЕ советуй спиннинг, джиг, микроджиг.
+    - Делай упор на подлёдную ловлю (мормышка, балансиры, блесны, жерлицы) или честно скажи, что по спиннингу зимой данных нет и лучше не гадать.
+- Если сейчас лето и в facts есть много упоминаний летних методов — можешь их советовать.
+- Никогда не придумывай бренды и модели приманок, которых нет в facts, если пользователь явно не просил примеры.
+
+СТРУКТУРА ОТВЕТА:
+
+1) Сначала скажи, есть ли подтверждённые факты:
+   - Если facts.has_data=false — напиши, что по отчётам явных данных нет, и сразу переходи к универсальным сезонным советам.
+   - Если facts.has_data=true — кратко опиши, какие основные виды рыбы и методы часто встречаются в facts (например: «чаще всего ловят плотву на фидер» или «много упоминаний окуня на мормышку»).
+
+2) Основной совет:
+   - Опирайся на сезон:
+       - Зимой — подлёдные снасти и поиск по ямам/бровкам/перепадам; никакого «летнего» спиннинга, если нет явных зимних отчётов по спиннингу.
+       - Летом — спиннинг/поплавок/фидер по необходимости.
+   - Если в facts есть явные указания «зимой», «в январе», «по первому льду» и т.п. — можешь использовать эти методы как подтверждённые зимние.
+   - Делай упор на тактику: где искать (типы мест), как подавать приманку, на что обратить внимание.
+
+3) Точки/места:
+   - Если в facts.key_notes есть информация по водоёму/местам, можешь аккуратно упомянуть типы мест (бровки, коряжники, перекаты), но не выдумывай новых топонимов.
+   - При вопросах «где именно» или «точки» помни, что это чувствительная информация: лучше говорить о типах структур (бровка, яма) и сторонах (выше/ниже моста), чем о точных координатах, если их нет в facts.
+
+4) Ссылки:
+   - Блок "Проверить на форуме:" добавляй ТОЛЬКО если facts.check_links не пустой.
+   - Ссылки просто списком; не утверждай, что они свежие.
+
+В КОНЦЕ всегда пиши "НХНЧ!" или "Ни хвоста, ни чешуи!".
+"""
+
 async def main_handler(message: Message):
     text = message.caption or message.text
     query = text[1:].strip()
@@ -480,11 +523,13 @@ async def main_handler(message: Message):
 
     day_offset = extract_day_offset(query)
 
+    # 1) анализ интента
     analysis = await analyze_user_query(query)
     intent = (analysis.get("intent") or "general").strip()
     loc_name = (analysis.get("location_name") or "").strip()
     logging.warning("INTENT=%s loc=%s query=%s", intent, loc_name, query)
 
+    # 2) контекст по кэшу мест
     river_context = ""
     found_river_key = None
 
@@ -511,7 +556,7 @@ async def main_handler(message: Message):
             await message.reply(
                 f"📍 **{found_river_key}**. Выберите место (база Русфишинга):",
                 reply_markup=kb.as_markup(),
-                parse_mode="Markdown",
+                parse_mode="Markdown"
             )
             return
 
@@ -519,57 +564,44 @@ async def main_handler(message: Message):
 
         forum_context = ""
         try:
-            search_q = f"{loc_name} отчет сегодня январь"
-            forum_context = await scraper.get_rusfishing_context(search_q)
+            forum_context = await scraper.get_rusfishing_context(query + " отчет сегодня январь")
         except Exception as e:
             logging.warning("Vertex forum context failed: %s", e)
 
         facts = await extract_facts_from_rusfishing(query, forum_context)
-        logging.warning("FACTS has_data=%s links=%s",
-                        facts.get("has_data"), len(facts.get("check_links", [])))
-
-        answer = await render_answer_from_facts(
-            query,
-            facts,
-            weather=weather or "",
-            intent="forecast",
-        )
+        answer = await render_answer_from_facts(query, facts, weather=weather or "", intent="forecast")
         await safe_send_markdown(message, answer)
         return
+
 
     # ===== fish_search =====
     elif intent == "fish_search":
         forum_context = ""
         try:
-            search_q = f"{query} отчет"
-            forum_context = await scraper.get_rusfishing_context(search_q)
+            forum_context = await scraper.get_rusfishing_context(query)
         except Exception as e:
             logging.warning("Vertex forum context failed: %s", e)
 
         facts = await extract_facts_from_rusfishing(query, forum_context)
+        facts = normalize_facts(facts)
 
         if river_context:
-            facts.setdefault("key_notes", [])
             facts["key_notes"].insert(0, river_context)
 
         month = datetime.date.today().month
         is_winter = month in (12, 1, 2)
         if is_winter and not facts.get("has_data"):
-            facts.setdefault("key_notes", [])
-            facts["key_notes"].append(
-                "Сезон: зима. Если по спиннингу нет подтверждений в отчетах — лучше не гадать."
-            )
+            facts["key_notes"].append("Сезон: зима. Если по спиннингу нет подтверждений в отчетах — лучше не гадать.")
 
         answer = await render_answer_from_facts(
             user_query=query,
             facts=facts,
             weather="",
-            intent="fish_search",
+            intent="fish_search"
         )
         await safe_send_markdown(message, answer)
         return
-
-    # ===== general =====
+        # ===== general =====
     else:
         resp = await get_chat_response(message.from_user.id, query, "", "", "general")
         await safe_send_markdown(message, resp)
@@ -580,10 +612,10 @@ async def main_handler(message: Message):
 # BACKGROUND TASKS
 # =========================
 async def periodic_cache_update():
+    # Кэш мест обновляем отдельно (например через GitHub Actions), а не парсим форум с Render.
     while True:
         await asyncio.sleep(24 * 3600)
         logging.info("Cache update: skipped (offline).")
-
 
 async def start_web_server():
     app = web.Application()
@@ -593,7 +625,6 @@ async def start_web_server():
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-
 
 # =========================
 # MAIN
@@ -614,13 +645,13 @@ async def main():
     finally:
         await bot.session.close()
 
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
