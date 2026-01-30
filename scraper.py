@@ -180,6 +180,13 @@ async def get_rusfishing_context(user_query: str) -> str:
     if not results:
         return ""
 
+    # если есть page-XXXX — оставляем только самые свежие (по максимальному номеру страницы)
+    with_pages = [r for r in results if _extract_page_num(r.get("link", "")) > 0]
+    if with_pages:
+        with_pages.sort(key=lambda r: _extract_page_num(r.get("link", "")), reverse=True)
+        results = with_pages[:5]
+
+
     lines = []
     links = []
     for i, r in enumerate(results[:5], 1):
