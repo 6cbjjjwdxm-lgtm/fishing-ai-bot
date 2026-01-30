@@ -22,6 +22,10 @@ def load_cache():
     except Exception:
         return {}
 
+def _extract_page_num(url: str) -> int:
+    m = re.search(r"/page-(\d+)", url or "")
+    return int(m.group(1)) if m else 0
+
 
 # =========================
 # VERTEX AI SEARCH CONFIG
