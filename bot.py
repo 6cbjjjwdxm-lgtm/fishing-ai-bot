@@ -249,6 +249,7 @@ FACTS_EXTRACTOR_SYSTEM = """
 - check_links бери ТОЛЬКО из блока "ССЫЛКИ ДЛЯ ПРОВЕРКИ" (если ссылок нет — []).
 - Если в выжимке нет явных фактов по клеву/уловам/снастям — has_data=false.
 - Если про лед/открытую воду ничего нет — "unknown".
+- Если в сниппете нет признаков свежести (дата/вчера/сегодня/январь/зима), не делай уверенный вывод о ‘сейчас/завтра’, отмечай как неподтвержденное.
 """
 
 async def extract_facts_from_rusfishing(user_query: str, forum_context: str) -> Dict:
@@ -279,6 +280,17 @@ ANSWER_SYSTEM = """
 - Блок "Проверить на форуме:" добавляй ТОЛЬКО если facts.check_links не пустой (3–5 ссылок).
 В конце: "НХНЧ!".
 """
+ANSWER_SYSTEM_FORECAST = """
+Ты даешь прогноз клева для спиннинга/фидера/поплавка на указанную дату.
+
+Структура ответа (обязательно):
+1) Погода (возьми только из weather): температура, давление, ветер, фаза луны.
+2) Прогноз клева (обязательно): оценка "плохой/средний/нормальный" + 2 причины (погода/сезон/отчеты).
+3) Что делать (обязательно): 2–4 конкретных действия (где искать; какая снасть/подход). Без выдуманных мест и брендов, если их нет в facts.
+4) Если facts.has_data=false: скажи, что свежих отчетов нет, и сделай прогноз только по погоде + сезон (без выдумок).
+5) "Проверить на форуме:" добавляй только если facts.check_links не пустой (3–5 ссылок).
+В конце: НХНЧ!
+"""
 
 async def render_answer_from_facts(user_query: str, facts: Dict, weather: str, intent: str) -> str:
     # weather можно добавлять только для forecast; для fish_search обычно пусто
@@ -296,7 +308,7 @@ async def render_answer_from_facts(user_query: str, facts: Dict, weather: str, i
 
 async def get_chat_response(user_id: int, text: str, weather: str, loc_name: str,
                             intent: str, extra_context: str = "") -> str:
-    system_text = PROMPT_FORECAST if intent == "forecast" else PROMPT_ADVICE
+    system_text = ANSWER_SYSTEM_FORECAST if intent == "forecast" else ANSWER_SYSTEM
 
     user_content = f"ВОПРОС ПОЛЬЗОВАТЕЛЯ: {text}\n"
 
@@ -531,6 +543,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
