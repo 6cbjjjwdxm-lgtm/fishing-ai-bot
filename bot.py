@@ -293,13 +293,14 @@ ANSWER_SYSTEM_FORECAST = """
 """
 
 async def render_answer_from_facts(user_query: str, facts: Dict, weather: str, intent: str) -> str:
-    # weather можно добавлять только для forecast; для fish_search обычно пусто
     payload = {"query": user_query, "intent": intent, "weather": weather or "", "facts": facts}
+
+    system_text = ANSWER_SYSTEM_FORECAST if intent == "forecast" else ANSWER_SYSTEM
 
     resp = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": ANSWER_SYSTEM},
+            {"role": "system", "content": system_text},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
         temperature=0.2 if intent in ("forecast", "fish_search") else 0.7
@@ -389,7 +390,8 @@ async def cb_location_select(callback: CallbackQuery):
 
         forum_context = ""
         try:
-            forum_context = await scraper.get_rusfishing_context(f"{river} {place} клев")
+            search_q = f"{river} {place} отчет сегодня январь"
+            forum_context = await scraper.get_rusfishing_context(search_q)
         except Exception as e:
             logging.warning("Vertex forum context failed: %s", e)
 
@@ -456,7 +458,7 @@ async def main_handler(message: Message):
 
         forum_context = ""
         try:
-            forum_context = await scraper.get_rusfishing_context(query)
+            forum_context = await scraper.get_rusfishing_context(query + " отчет сегодня январь")
         except Exception as e:
             logging.warning("Vertex forum context failed: %s", e)
 
@@ -543,6 +545,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
