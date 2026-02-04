@@ -6,8 +6,8 @@ import time
 from typing import Dict, List
 
 import aiohttp
-from google.oauth2 import service_account
 from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import service_account
 
 # =========================
 # CACHE (для кнопок мест)
@@ -27,7 +27,6 @@ def load_cache():
 # HELPERS
 # =========================
 def _norm(s: str) -> str:
-    # важно: \s+ — искать все пробельные символы
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 
@@ -47,7 +46,6 @@ def _clean_snippet(s: str) -> str:
 
 
 def _extract_page_num(url: str) -> int:
-    # вытаскиваем номер page-XXXX из URL, если он есть
     m = re.search(r"/page-(\d+)", url or "")
     return int(m.group(1)) if m else 0
 
@@ -70,7 +68,10 @@ def _prefer_newer_pages(results: List[Dict], limit: int = 5) -> List[Dict]:
 # =========================
 VERTEX_PROJECT_ID = (os.getenv("VERTEX_PROJECT_ID") or "").strip()
 VERTEX_LOCATION = (os.getenv("VERTEX_LOCATION") or "global").strip()
-VERTEX_ENGINE_ID = (os.getenv("VERTEX_ENGINE_ID") or "").strip()
+
+# ВАЖНО: теперь используем Data Store ID, а не Engine ID
+VERTEX_DATA_STORE_ID = (os.getenv("VERTEX_DATA_STORE_ID") or "").strip()
+
 GOOGLE_SA_JSON = (os.getenv("GOOGLE_SA_JSON") or "").strip()
 
 _token_cache = {"token": None, "exp": 0}
@@ -98,19 +99,23 @@ def _get_access_token() -> str:
 
 
 async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
-    if not (VERTEX_PROJECT_ID and VERTEX_LOCATION and VERTEX_ENGINE_ID):
-        raise RuntimeError("VERTEX_PROJECT_ID / VERTEX_LOCATION / VERTEX_ENGINE_ID not set")
+    if not (VERTEX_PROJECT_ID and VERTEX_LOCATION and VERTEX_DATA_STORE_ID):
+        raise RuntimeError(
+            "VERTEX_PROJECT_ID / VERTEX_LOCATION / VERTEX_DATA_STORE_ID not set"
+        )
 
     token = _get_access_token()
 
+    # Data store serving configs (вместо engines/*)
     serving_configs = [
         f"projects/{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}/collections/default_collection"
-        f"/engines/{VERTEX_ENGINE_ID}/servingConfigs/default_search",
+        f"/dataStores/{VERTEX_DATA_STORE_ID}/servingConfigs/default_search",
         f"projects/{VERTEX_PROJECT_ID}/locations/{VERTEX_LOCATION}/collections/default_collection"
-        f"/engines/{VERTEX_ENGINE_ID}/servingConfigs/default_serving_config",
+        f"/dataStores/{VERTEX_DATA_STORE_ID}/servingConfigs/default_serving_config",
     ]
 
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
     payload = {
         "query": _norm(query),
         "pageSize": max(1, min(int(page_size), 10)),
@@ -119,7 +124,7 @@ async def vertex_search(query: str, page_size: int = 7) -> List[Dict]:
             "snippetSpec": {"returnSnippet": True},
             "extractiveContentSpec": {
                 "maxExtractiveAnswerCount": 1,
-                "maxExtractiveSegmentCount": 1
+                "maxExtractiveSegmentCount": 1,
             },
         },
     }
@@ -195,7 +200,6 @@ async def get_rusfishing_context(user_query: str) -> str:
     if not results:
         return ""
 
-    # Предпочитаем более свежие страницы ветки
     results = _prefer_newer_pages(results, limit=5)
 
     lines = []
