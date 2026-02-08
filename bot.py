@@ -284,6 +284,11 @@ async def handle_text(message: Message):
     if not await subscription_gate(message):
         return
 
+    if message.from_user.id in ADMIN_IDS and message.text.strip() == "*pin":
+        mid = await post_and_pin(message.bot)
+        await message.reply(f"OK pinned message_id={mid}")
+        return
+
     query = text[1:].strip()
     if not query:
         return
@@ -332,6 +337,27 @@ async def handle_text(message: Message):
     ans = await assistant_text(client, user_id=uid, query=query, extra_context=None, temperature=0.65)
     await safe_send_markdown(message, ans)
 
+ADMIN_IDS = [int(x) for x in (os.getenv("ADMIN_IDS","").split(",")) if x.strip().isdigit()]
+
+async def post_and_pin(bot: Bot):
+    TARGET_CHANNEL = os.getenv("REPORT_TARGET_CHANNEL", "@dnevnikrib")
+    BOT_USERNAME = os.getenv("BOT_USERNAME", "expertfishing_bot")
+    url = f"https://t.me/{BOT_USERNAME}?start=report"
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить отчёт", url=url)
+    kb.adjust(1)
+
+    text = (
+        "📌 AI‑ассистент и отчёты\n\n"
+        "🧾 Нажми кнопку ниже — заполни отчёт по шаблону, бот опубликует пост анонимно.\n"
+        "🤖 Для AI‑советов пиши боту со `*`: например *клев завтра в Подольске"
+    )
+
+    msg = await bot.send_message(TARGET_CHANNEL, text, reply_markup=kb.as_markup(), disable_web_page_preview=True)
+    await bot.pin_chat_message(TARGET_CHANNEL, msg.message_id, disable_notification=True)
+    return msg.message_id
 
 async def start_web_server():
     app = web.Application()
@@ -356,6 +382,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
 
 
 
