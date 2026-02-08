@@ -2,6 +2,7 @@ import datetime
 import json
 from typing import Any, Dict, Optional, Tuple
 
+from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from openai import AsyncOpenAI
@@ -17,13 +18,22 @@ STEP_RESULTS = "results"
 STEP_NOTES = "notes"
 STEP_CONFIRM = "confirm"
 
+# режим редактирования конкретного поля
+STEP_EDIT = "edit"  # r["edit_field"] = "place_text" | "method" | ...
+
+
+class RepCB(CallbackData, prefix="rep"):
+    action: str          # send/restart/cancel/edit/edit_geo/back
+    field: str = "none"  # place/method/bait/results/notes
+
 
 def start_report(user_id: int) -> Dict[str, Any]:
     REPORT_SESSIONS[user_id] = {
         "step": STEP_MEDIA,
-        "media": [],      # [{"type":"photo|video","file_id":"..."}]
+        "edit_field": None,
+        "media": [],
         "place_text": "",
-        "geo": None,      # {"lat":..,"lon":..}
+        "geo": None,
         "method": "",
         "bait": "",
         "results": "",
@@ -45,15 +55,6 @@ def cancel_report(user_id: int):
     REPORT_SESSIONS.pop(user_id, None)
 
 
-def report_keyboard_confirm() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Отправить в канал", callback_data="rep:send")
-    kb.button(text="✏️ Начать заново", callback_data="rep:restart")
-    kb.button(text="❌ Отмена", callback_data="rep:cancel")
-    kb.adjust(1)
-    return kb.as_markup()
-
-
 def _geo_line(geo: Optional[Dict[str, Any]]) -> str:
     if isinstance(geo, dict) and "lat" in geo and "lon" in geo:
         return f"{geo['lat']:.5f}, {geo['lon']:.5f}"
@@ -67,11 +68,9 @@ def render_report_text(r: Dict[str, Any], public_channel_url: str = "") -> str:
     results = r.get("results") or "—"
     notes = r.get("notes") or "—"
 
-    tail = ""
-    if public_channel_url:
-        tail = f"\n\n🔗 Канал: {public_channel_url}"
+    tail = f"\n\n🔗 Канал: {public_channel_url}" if public_channel_url else ""
 
-    text = (
+    return (
         "🎣 **Рыболовный отчёт**\n"
         f"📍 **Место:** {place}\n"
         f"🧭 **Координаты:** {_geo_line(r.get('geo'))}\n"
@@ -83,11 +82,9 @@ def render_report_text(r: Dict[str, Any], public_channel_url: str = "") -> str:
         "_Отправлено анонимно._"
         f"{tail}"
     )
-    return text
 
 
 def validate_required(r: Dict[str, Any]) -> Tuple[bool, str]:
-    # Минимально необходимые поля: место, способ, приманки, результат
     if not (r.get("place_text") or "").strip():
         return False, "Не заполнено поле: место."
     if not (r.get("method") or "").strip():
@@ -119,6 +116,30 @@ async def moderate_text_openai(client: AsyncOpenAI, text: str) -> Tuple[bool, st
     return bool(data.get("ok")), (data.get("reason") or "").strip()
 
 
+def keyboard_confirm_and_edit() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+
+    kb.button(text="✅ Отправить", callback_data=RepCB(action="send"))
+    kb.button(text="🧩 Править поля", callback_data=RepCB(action="edit_menu"))
+    kb.button(text="✏️ Начать заново", callback_data=RepCB(action="restart"))
+    kb.button(text="❌ Отмена", callback_data=RepCB(action="cancel"))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def keyboard_edit_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📍 Место", callback_data=RepCB(action="edit", field="place"))
+    kb.button(text="🧊/🚣 Способ", callback_data=RepCB(action="edit", field="method"))
+    kb.button(text="🪱 Приманки", callback_data=RepCB(action="edit", field="bait"))
+    kb.button(text="🐟 Улов", callback_data=RepCB(action="edit", field="results"))
+    kb.button(text="📝 Комментарий", callback_data=RepCB(action="edit", field="notes"))
+    kb.button(text="🧭 Гео", callback_data=RepCB(action="edit_geo"))
+    kb.button(text="⬅️ Назад к черновику", callback_data=RepCB(action="back"))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
 async def next_prompt(r: Dict[str, Any]) -> str:
     step = r.get("step")
     if step == STEP_MEDIA:
@@ -146,10 +167,43 @@ def _advance_step(r: Dict[str, Any], new_step: str):
     r["step"] = new_step
 
 
+def _set_edit_mode(r: Dict[str, Any], field_key: str):
+    r["step"] = STEP_EDIT
+    r["edit_field"] = field_key
+
+
+def _clear_edit_mode(r: Dict[str, Any]):
+    r["edit_field"] = None
+    r["step"] = STEP_CONFIRM
+
+
+def edit_prompt(field: str) -> str:
+    prompts = {
+        "place_text": "Введи новое **место** (водоём/район/ориентир).",
+        "method": "Введи новый **способ ловли** (лёд/берег/лодка + снасть).",
+        "bait": "Введи новые **приманки/насадки/прикормку**.",
+        "results": "Введи новый **улов/результат**.",
+        "notes": "Введи новый **комментарий** (условия, что сработало).",
+    }
+    return prompts.get(field, "Введи новое значение.")
+
+
 async def handle_report_text_input(r: Dict[str, Any], text: str) -> Optional[str]:
     t = (text or "").strip()
     step = r.get("step")
 
+    # === режим редактирования ===
+    if step == STEP_EDIT:
+        field = r.get("edit_field")
+        if not field:
+            _clear_edit_mode(r)
+            return "Ок."
+
+        r[field] = t
+        _clear_edit_mode(r)
+        return "✅ Исправил. Возвращаюсь к черновику."
+
+    # === мастер заполнения ===
     if step == STEP_MEDIA:
         if t.lower() in ("готово", "готов", "done", "ок"):
             _advance_step(r, STEP_PLACE)
@@ -190,11 +244,19 @@ async def handle_report_text_input(r: Dict[str, Any], text: str) -> Optional[str
         _advance_step(r, STEP_CONFIRM)
         return "Черновик отчёта готов. Проверь и отправляй."
 
+    if step == STEP_CONFIRM:
+        return "Черновик уже готов. Нажми кнопки ниже (править/отправить)."
+
     return None
 
 
 def handle_report_location(r: Dict[str, Any], lat: float, lon: float) -> str:
     r["geo"] = {"lat": float(lat), "lon": float(lon)}
+    # если редактировали гео — возвращаемся в confirm
+    if r.get("step") == STEP_EDIT and r.get("edit_field") == "geo":
+        _clear_edit_mode(r)
+        return "✅ Геолокация обновлена. Возвращаюсь к черновику."
     _advance_step(r, STEP_METHOD)
-    return "Локация принята.\n" + "Дальше: " + "Как ловил? (со льда/с берега/с лодки + снасть...)"
+    return "Локация принята.\nДальше: Как ловил? (со льда/с берега/с лодки + снасть...)"
+
 
