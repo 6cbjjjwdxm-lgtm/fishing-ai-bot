@@ -1,10 +1,15 @@
 import datetime
+import json
+import logging
 import os
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(sys.stdout)], force=True)
+
+OPENWEATHER_API_KEY = (os.getenv("OPENWEATHER_API_KEY") or "").strip()
 
 
 def get_moon_phase() -> str:
@@ -31,9 +36,10 @@ def hpa_to_mm(hpa: float) -> int:
 
 async def geocode_city(city: str, country: str = "RU", limit: int = 1) -> Optional[Dict[str, Any]]:
     """
-    Direct geocoding: city name -> lat/lon. [web:309]
+    OpenWeather Geocoding API (direct). [web:308][web:309]
     """
     if not OPENWEATHER_API_KEY or not city:
+        logging.warning("GEOCODE skipped: missing key or city (key=%s city=%s)", bool(OPENWEATHER_API_KEY), city)
         return None
 
     url = "http://api.openweathermap.org/geo/1.0/direct"
@@ -43,12 +49,18 @@ async def geocode_city(city: str, country: str = "RU", limit: int = 1) -> Option
         "appid": OPENWEATHER_API_KEY,
     }
 
-    timeout = aiohttp.ClientTimeout(total=8)
+    timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(url, params=params) as r:
+            body = await r.text()
+            logging.warning("GEOCODE request q=%s status=%s", params["q"], r.status)
+            logging.warning("GEOCODE body=%s", body[:400])
             if r.status != 200:
                 return None
-            data = await r.json()
+            try:
+                data = json.loads(body)
+            except Exception:
+                return None
 
     if not isinstance(data, list) or not data:
         return None
@@ -63,7 +75,9 @@ async def fetch_forecast_by_latlon(lat: float, lon: float) -> Optional[Dict[str,
     5 day / 3 hour forecast by coordinates. [web:160]
     """
     if not OPENWEATHER_API_KEY:
+        logging.warning("FORECAST skipped: missing key")
         return None
+
     url = "https://api.openweathermap.org/data/2.5/forecast"
     params = {
         "lat": lat,
@@ -73,12 +87,18 @@ async def fetch_forecast_by_latlon(lat: float, lon: float) -> Optional[Dict[str,
         "lang": "ru",
     }
 
-    timeout = aiohttp.ClientTimeout(total=8)
+    timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(url, params=params) as r:
+            body = await r.text()
+            logging.warning("FORECAST request lat=%s lon=%s status=%s", lat, lon, r.status)
+            logging.warning("FORECAST body=%s", body[:400])
             if r.status != 200:
                 return None
-            data = await r.json()
+            try:
+                data = json.loads(body)
+            except Exception:
+                return None
             if data.get("cod") == "200":
                 return data
     return None
@@ -142,16 +162,16 @@ def day_aggregate(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 async def _resolve_and_fetch(city: str) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    """
-    returns (geo, forecast_json)
-    """
-    # пытаемся геокодить даже если "Калуге" — API часто выруливает
     geo = await geocode_city(city)
     if not geo:
+        logging.warning("RESOLVE FAILED city=%s", city)
         return None
+
     fc = await fetch_forecast_by_latlon(float(geo["lat"]), float(geo["lon"]))
     if not fc:
+        logging.warning("FORECAST FAILED city=%s lat=%s lon=%s", city, geo.get("lat"), geo.get("lon"))
         return None
+
     return geo, fc
 
 
@@ -223,3 +243,4 @@ async def get_weather_5days(city: str) -> Optional[List[Dict[str, Any]]]:
         out.append(agg)
 
     return out
+
