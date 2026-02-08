@@ -34,6 +34,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 REPORT_TARGET_CHANNEL = (os.getenv("REPORT_TARGET_CHANNEL") or "").strip()
+PUBLIC_CHANNEL_URL = (os.getenv("PUBLIC_CHANNEL_URL") or "").strip()
+
 REQUIRED_CHANNELS = [c.strip() for c in (os.getenv("REQUIRED_CHANNELS") or "").split(",") if c.strip()]
 
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
@@ -68,23 +70,17 @@ async def is_subscribed(bot: Bot, user_id: int, channels: List[str]) -> bool:
 
 
 async def subscription_gate(message: Message) -> bool:
-    # True = можно, False = нельзя
     if not REQUIRED_CHANNELS:
         return True
     ok = await is_subscribed(message.bot, message.from_user.id, REQUIRED_CHANNELS)
     if not ok:
-        await safe_send_markdown(
-            message,
-            "Доступ только для подписчиков канала(ов).\n"
-            "Подпишись и попробуй снова."
-        )
+        await safe_send_markdown(message, "Доступ только для подписчиков канала(ов). Подпишись и попробуй снова.")
         return False
     return True
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    # /start report
     text = message.text or ""
     if "report" in text:
         if not await subscription_gate(message):
@@ -96,11 +92,7 @@ async def cmd_start(message: Message):
 
     await message.answer(
         "👋 Привет! Я рыболовный AI‑ассистент.\n\n"
-        "Я отвечаю только на сообщения со звёздочкой `*`.\n"
-        "Примеры:\n"
-        "`*клев завтра в Звенигороде`\n"
-        "`*прогноз клева на 5 дней в Подольске`\n"
-        "`*подбери комплект спиннинга на щуку бюджет 20к`\n\n"
+        "Я отвечаю только на сообщения со `*`.\n"
         "Чтобы добавить отчёт: нажми кнопку в закрепе канала (или /start report)."
     )
 
@@ -130,49 +122,55 @@ async def report_callbacks(callback: CallbackQuery):
             await safe_send_markdown(callback.message, "⚠️ REPORT_TARGET_CHANNEL не настроен в .env")
             return
 
-        draft = reports.render_report_text(r)
-        ok, reason = await reports.moderate_text_openai(client, draft)
-        if not ok:
+        ok_req, why = reports.validate_required(r)
+        if not ok_req:
+            await safe_send_markdown(callback.message, f"⚠️ {why}\nДополни отчёт, пожалуйста.")
+            return
+
+        draft = reports.render_report_text(r, public_channel_url=PUBLIC_CHANNEL_URL)
+
+        ok_mod, reason = await reports.moderate_text_openai(client, draft)
+        if not ok_mod:
             await safe_send_markdown(callback.message, f"⚠️ Отчёт не прошёл модерацию: {reason}\nПерепиши текст без нарушений и попробуй снова.")
-            # возвращаем на шаг NOTES, чтобы пользователь переписал
             r["step"] = reports.STEP_NOTES
             return
 
-        # Публикация: сначала медиа (если есть), потом текст
         bot = callback.message.bot
         media = r.get("media") or []
 
         try:
-            if media:
-                # отправляем по одному (проще). Можно заменить на sendMediaGroup.
-                for item in media[:10]:
-                    if item["type"] == "photo":
-                        await bot.send_photo(chat_id=REPORT_TARGET_CHANNEL, photo=item["file_id"])
-                    elif item["type"] == "video":
-                        await bot.send_video(chat_id=REPORT_TARGET_CHANNEL, video=item["file_id"])
+            # 1) медиа (если есть)
+            for item in media[:10]:
+                if item["type"] == "photo":
+                    await bot.send_photo(chat_id=REPORT_TARGET_CHANNEL, photo=item["file_id"])
+                elif item["type"] == "video":
+                    await bot.send_video(chat_id=REPORT_TARGET_CHANNEL, video=item["file_id"])
 
+            # 2) текст поста
             await bot.send_message(chat_id=REPORT_TARGET_CHANNEL, text=draft, parse_mode="Markdown")
+
             reports.cancel_report(uid)
-            await safe_send_markdown(callback.message, "✅ Отчёт отправлен в канал.")
+            await safe_send_markdown(callback.message, "✅ Отчёт опубликован в канале.")
         except Exception:
             logging.exception("send to channel failed")
             await safe_send_markdown(callback.message, "⚠️ Не удалось отправить в канал. Проверь: бот админ канала и есть право постинга.")
+        return
 
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    caption = message.caption or ""
     uid = message.from_user.id
+    caption = message.caption or ""
 
-    # 1) Если активен отчёт — фото добавляем в отчёт (без звездочки)
+    # отчёт: фото добавляем без звездочки
     if reports.has_active_report(uid):
         r = reports.get_report(uid)
         if r and r.get("step") == reports.STEP_MEDIA:
             r["media"].append({"type": "photo", "file_id": message.photo[-1].file_id})
-            await safe_send_markdown(message, "Фото добавлено. Можешь прислать ещё или напиши `готово`.")
+            await safe_send_markdown(message, "Фото добавлено. Ещё фото/видео или напиши `готово`.")
             return
 
-    # 2) В режиме ассистента: обрабатываем фото только если подпись начинается с *
+    # ассистент: только если подпись с *
     if not caption.startswith("*"):
         return
     if not await subscription_gate(message):
@@ -183,9 +181,7 @@ async def handle_photo(message: Message):
 
     try:
         bot = message.bot
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-
+        file = await bot.get_file(message.photo[-1].file_id)
         buf = io.BytesIO()
         await bot.download_file(file.file_path, destination=buf)
         image_bytes = buf.getvalue()
@@ -204,7 +200,7 @@ async def handle_video(message: Message):
         r = reports.get_report(uid)
         if r and r.get("step") == reports.STEP_MEDIA:
             r["media"].append({"type": "video", "file_id": message.video.file_id})
-            await safe_send_markdown(message, "Видео добавлено. Можешь прислать ещё или напиши `готово`.")
+            await safe_send_markdown(message, "Видео добавлено. Ещё или напиши `готово`.")
             return
 
 
@@ -214,11 +210,8 @@ async def handle_location(message: Message):
     if not reports.has_active_report(uid):
         return
     r = reports.get_report(uid)
-    if not r:
+    if not r or r.get("step") != reports.STEP_GEO:
         return
-    if r.get("step") != reports.STEP_GEO:
-        return
-
     txt = reports.handle_report_location(r, message.location.latitude, message.location.longitude)
     await safe_send_markdown(message, txt)
 
@@ -228,22 +221,20 @@ async def handle_text(message: Message):
     text = message.text or ""
     uid = message.from_user.id
 
-    # 1) Если активен отчёт — обрабатываем как ввод мастера
+    # отчётный мастер
     if reports.has_active_report(uid):
         r = reports.get_report(uid)
-        if not r:
-            return
         reply = await reports.handle_report_text_input(r, text)
 
         if r.get("step") == reports.STEP_CONFIRM:
-            draft = reports.render_report_text(r)
-            await safe_send_markdown(message, reply or "Черновик готов.", reply_markup=reports.report_keyboard_confirm())
+            draft = reports.render_report_text(r, public_channel_url=PUBLIC_CHANNEL_URL)
+            await safe_send_markdown(message, "Черновик:\n\n" + draft, reply_markup=reports.report_keyboard_confirm())
         else:
             if reply:
                 await safe_send_markdown(message, reply)
         return
 
-    # 2) Ассистент отвечает только на *
+    # ассистент: только на *
     if not text.startswith("*"):
         return
     if not await subscription_gate(message):
@@ -256,8 +247,6 @@ async def handle_text(message: Message):
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     intent = classify_intent_ru(query)
-    extra_context = None
-
     if intent == INTENT_FORECAST:
         city = extract_city_simple(query)
         if not city:
@@ -268,10 +257,10 @@ async def handle_text(message: Message):
         if any(w in low for w in ["на 5", "5 дней", "пять дней", "на неделю", "неделю"]):
             days = await get_weather_5days(city)
             if not days:
-                await safe_send_markdown(message, f"⚠️ Не нашёл погоду для: {city}. Попробуй другое название.")
+                await safe_send_markdown(message, f"⚠️ Не нашёл погоду для: {city}.")
                 return
-            extra_context = {"tool": "openweather_forecast_5d", "city": city, "days": days}
-            ans = await assistant_text(client, user_id=uid, query=query, extra_context=extra_context, temperature=0.45)
+            ctx = {"tool": "openweather_forecast_5d", "city": city, "days": days}
+            ans = await assistant_text(client, user_id=uid, query=query, extra_context=ctx, temperature=0.45)
             await safe_send_markdown(message, ans)
             return
 
@@ -288,15 +277,14 @@ async def handle_text(message: Message):
 
         w = await get_weather_for_day(city, day_offset)
         if not w:
-            await safe_send_markdown(message, f"⚠️ Не нашёл погоду для: {city}. Попробуй другое название.")
+            await safe_send_markdown(message, f"⚠️ Не нашёл погоду для: {city}.")
             return
 
-        extra_context = {"tool": "openweather_forecast_day", "city": city, "weather": w}
-        ans = await assistant_text(client, user_id=uid, query=query, extra_context=extra_context, temperature=0.45)
+        ctx = {"tool": "openweather_forecast_day", "city": city, "weather": w}
+        ans = await assistant_text(client, user_id=uid, query=query, extra_context=ctx, temperature=0.45)
         await safe_send_markdown(message, ans)
         return
 
-    # Остальное: полный ассистент
     ans = await assistant_text(client, user_id=uid, query=query, extra_context=None, temperature=0.65)
     await safe_send_markdown(message, ans)
 
@@ -324,25 +312,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
