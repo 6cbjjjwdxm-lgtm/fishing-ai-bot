@@ -2,19 +2,14 @@ import base64
 import datetime
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
-# intents
-INTENT_FORECAST = "forecast"
-INTENT_GEAR = "gear"
-INTENT_TACTICS = "tactics"
-INTENT_GENERAL = "general"
-
-# Память на пользователя: user_id -> messages[]
-# ВАЖНО: храним только короткую историю
 USER_HISTORIES: Dict[int, List[Dict[str, Any]]] = {}
+
+INTENT_FORECAST = "forecast"
+INTENT_OTHER = "other"
 
 
 def _norm(s: str) -> str:
@@ -23,21 +18,9 @@ def _norm(s: str) -> str:
 
 def classify_intent_ru(text: str) -> str:
     t = (text or "").lower()
-
-    if any(w in t for w in ["клев", "клёв", "прогноз клева", "прогноз клёва", "клюет", "клюёт"]):
+    if any(w in t for w in ["клев", "клёв", "прогноз", "клюет", "клюёт"]):
         return INTENT_FORECAST
-    if any(w in t for w in ["на 5", "5 дней", "пять дней", "на неделю", "неделю"]) and any(w in t for w in ["клев", "клёв", "прогноз"]):
-        return INTENT_FORECAST
-
-    if any(w in t for w in ["катушка", "удилище", "спиннинг", "фидер", "поплав", "шнур", "леска",
-                            "приманк", "комплект", "набор", "мотор", "лодк", "эхолот"]):
-        return INTENT_GEAR
-
-    if any(w in t for w in ["как ловить", "где ловить", "где искать", "тактика", "проводк", "прикормк",
-                            "точк", "места", "ям", "бровк", "перекат", "коряж"]):
-        return INTENT_TACTICS
-
-    return INTENT_GENERAL
+    return INTENT_OTHER
 
 
 def extract_day_offset_ru(text: str) -> Optional[int]:
@@ -65,10 +48,6 @@ def extract_date_iso(text: str) -> Optional[str]:
 
 
 def extract_city_simple(query: str) -> str:
-    """
-    Очень простой экстрактор локации.
-    Формат: "... в <город/место>"
-    """
     q = _norm(query)
     low = q.lower()
     if " в " not in f" {low} ":
@@ -77,53 +56,41 @@ def extract_city_simple(query: str) -> str:
 
 
 ASSISTANT_SYSTEM = """
-Ты — рыболовный AI‑ассистент и гид, стиль — как опытный рыбак‑практик.
+Ты — рыболовный AI‑ассистент и гид.
 
-ТЫ УМЕЕШЬ:
-- Давать прогноз клева по погоде (температура, давление, ветер, осадки, фаза луны) на сегодня/завтра/послезавтра и на 5 дней вперёд (если данные есть).
-- Разделять прогноз: Белая рыба (как группа) и Хищник (как группа).
-- Подбирать снасти/комплекты/моторы/тактику.
-- По фото: определить вероятный вид рыбы или тип снасти, объяснить признаки и дать советы.
+Функции:
+- Прогноз клева по погоде, отдельно: Белая рыба и Хищник.
+- Подбор снастей/комплектов/моторов, тактика ловли.
+- Анализ фото рыбы/снасти.
 
-ПРАВИЛА ЧЕСТНОСТИ:
-- Не ссылайся на форумы/отзывы/интернет: у тебя нет доступа к ним.
-- Если в данных нет точности — говори прямо (например: "по фото могу ошибиться", "погода доступна на 5 дней").
-- Не обещай 100% клёв.
-
-СЕЗОН:
-- Если season = winter (декабрь/январь/февраль) и пользователь не сказал "открытая вода",
-  то давай рекомендации для ловли СО ЛЬДА (мормышка/балансир/блесна/жерлицы) и коротко напомни про безопасность льда.
-- Если пользователь явно говорит про открытую воду зимой — разрешено обсуждать фидер/спиннинг, но осторожно.
-
-ФОРМАТ:
-- Отвечай на русском.
-- Когда речь о прогнозе: обязательно отдельные блоки "Белая рыба" и "Хищник".
-- Пиши структурно, но живо.
-В конце, если тема рыбалки: "НХНЧ!"
+Правила:
+- Никаких ссылок/форумов/отзывов: доступа к интернету нет.
+- Не обещай 100%.
+- Зимой (декабрь/январь/февраль) по умолчанию советы со льда, если не сказано "открытая вода".
+- Пиши по‑товарищески, но структурно.
+В конце по теме рыбалки: "НХНЧ!"
 """.strip()
-
-
-def _b64_image(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")
 
 
 def _ensure_history(user_id: int):
     if user_id not in USER_HISTORIES:
         USER_HISTORIES[user_id] = [{"role": "system", "content": ASSISTANT_SYSTEM}]
     else:
-        # обновляем system на всякий случай
         if USER_HISTORIES[user_id] and USER_HISTORIES[user_id][0].get("role") == "system":
             USER_HISTORIES[user_id][0] = {"role": "system", "content": ASSISTANT_SYSTEM}
         else:
             USER_HISTORIES[user_id].insert(0, {"role": "system", "content": ASSISTANT_SYSTEM})
 
 
-def _trim_history(user_id: int, keep_last: int = 10):
+def _trim_history(user_id: int, keep_last: int = 12):
     msgs = USER_HISTORIES.get(user_id) or []
     if len(msgs) <= keep_last + 1:
         return
-    # сохраняем system + последние keep_last сообщений
     USER_HISTORIES[user_id] = [msgs[0]] + msgs[-keep_last:]
+
+
+def _b64_image(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
 
 
 async def assistant_text(
@@ -131,14 +98,14 @@ async def assistant_text(
     user_id: int,
     query: str,
     extra_context: Optional[Dict[str, Any]] = None,
-    temperature: float = 0.6,
+    temperature: float = 0.65,
 ) -> str:
     _ensure_history(user_id)
 
     if extra_context:
         USER_HISTORIES[user_id].append({
             "role": "user",
-            "content": "КОНТЕКСТ (данные от инструментов):\n" + json.dumps(extra_context, ensure_ascii=False)
+            "content": "КОНТЕКСТ:\n" + json.dumps(extra_context, ensure_ascii=False)
         })
 
     USER_HISTORIES[user_id].append({"role": "user", "content": query})
@@ -167,7 +134,7 @@ async def assistant_with_photo(
     if extra_context:
         USER_HISTORIES[user_id].append({
             "role": "user",
-            "content": "КОНТЕКСТ (данные от инструментов):\n" + json.dumps(extra_context, ensure_ascii=False)
+            "content": "КОНТЕКСТ:\n" + json.dumps(extra_context, ensure_ascii=False)
         })
 
     data_url = "data:image/jpeg;base64," + _b64_image(image_bytes)
@@ -190,3 +157,4 @@ async def assistant_with_photo(
     USER_HISTORIES[user_id].append({"role": "assistant", "content": ans})
     _trim_history(user_id, keep_last=12)
     return ans
+
