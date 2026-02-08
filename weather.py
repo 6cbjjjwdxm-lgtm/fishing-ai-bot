@@ -1,6 +1,6 @@
 import datetime
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -29,33 +29,58 @@ def hpa_to_mm(hpa: float) -> int:
     return int(hpa * 0.75006)
 
 
-async def fetch_openweather_forecast(city: str) -> Optional[Dict[str, Any]]:
+async def geocode_city(city: str, country: str = "RU", limit: int = 1) -> Optional[Dict[str, Any]]:
+    """
+    Direct geocoding: city name -> lat/lon. [web:309]
+    """
     if not OPENWEATHER_API_KEY or not city:
         return None
 
-    url = "https://api.openweathermap.org/data/2.5/forecast"
-    base_params = {"appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"}
-
-    queries = [
-        f"{city}, Moscow Oblast, RU",
-        f"{city}, RU",
-        city,
-    ]
+    url = "http://api.openweathermap.org/geo/1.0/direct"
+    params = {
+        "q": f"{city},{country}",
+        "limit": max(1, min(int(limit), 5)),
+        "appid": OPENWEATHER_API_KEY,
+    }
 
     timeout = aiohttp.ClientTimeout(total=8)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        for q in queries:
-            params = dict(base_params)
-            params["q"] = q
-            try:
-                async with session.get(url, params=params) as r:
-                    if r.status != 200:
-                        continue
-                    data = await r.json()
-                    if data.get("cod") == "200":
-                        return data
-            except Exception:
-                continue
+        async with session.get(url, params=params) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+
+    if not isinstance(data, list) or not data:
+        return None
+    item = data[0]
+    if "lat" not in item or "lon" not in item:
+        return None
+    return item
+
+
+async def fetch_forecast_by_latlon(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    """
+    5 day / 3 hour forecast by coordinates. [web:160]
+    """
+    if not OPENWEATHER_API_KEY:
+        return None
+    url = "https://api.openweathermap.org/data/2.5/forecast"
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "appid": OPENWEATHER_API_KEY,
+        "units": "metric",
+        "lang": "ru",
+    }
+
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, params=params) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            if data.get("cod") == "200":
+                return data
     return None
 
 
@@ -116,10 +141,25 @@ def day_aggregate(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     }
 
 
-async def get_weather_for_day(city: str, day_offset: int) -> Optional[Dict[str, Any]]:
-    data = await fetch_openweather_forecast(city)
-    if not data:
+async def _resolve_and_fetch(city: str) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """
+    returns (geo, forecast_json)
+    """
+    # пытаемся геокодить даже если "Калуге" — API часто выруливает
+    geo = await geocode_city(city)
+    if not geo:
         return None
+    fc = await fetch_forecast_by_latlon(float(geo["lat"]), float(geo["lon"]))
+    if not fc:
+        return None
+    return geo, fc
+
+
+async def get_weather_for_day(city: str, day_offset: int) -> Optional[Dict[str, Any]]:
+    res = await _resolve_and_fetch(city)
+    if not res:
+        return None
+    geo, data = res
 
     forecasts = data.get("list") or []
     target_date = datetime.date.today() + datetime.timedelta(days=max(0, int(day_offset)))
@@ -143,13 +183,20 @@ async def get_weather_for_day(city: str, day_offset: int) -> Optional[Dict[str, 
         "desc": (weather[0].get("description") or "").strip(),
         "moon": get_moon_phase(),
         "season": season_by_date(target_date),
+        "resolved": {
+            "name": geo.get("name"),
+            "lat": geo.get("lat"),
+            "lon": geo.get("lon"),
+            "country": geo.get("country"),
+        }
     }
 
 
 async def get_weather_5days(city: str) -> Optional[List[Dict[str, Any]]]:
-    data = await fetch_openweather_forecast(city)
-    if not data:
+    res = await _resolve_and_fetch(city)
+    if not res:
         return None
+    geo, data = res
 
     forecasts = data.get("list") or []
     by_day = group_by_day(forecasts)
@@ -166,6 +213,12 @@ async def get_weather_5days(city: str) -> Optional[List[Dict[str, Any]]]:
             "date": day,
             "moon": get_moon_phase(),
             "season": season_by_date(d),
+            "resolved": {
+                "name": geo.get("name"),
+                "lat": geo.get("lat"),
+                "lon": geo.get("lon"),
+                "country": geo.get("country"),
+            }
         })
         out.append(agg)
 
