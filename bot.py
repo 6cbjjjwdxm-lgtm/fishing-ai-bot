@@ -27,6 +27,7 @@ from ai_logic import (
     INTENT_FORECAST,
 )
 import reports
+from reports import RepCB  # CallbackData factory
 
 load_dotenv()
 
@@ -97,8 +98,8 @@ async def cmd_start(message: Message):
     )
 
 
-@dp.callback_query(F.data.startswith("rep:"))
-async def report_callbacks(callback: CallbackQuery):
+@dp.callback_query(RepCB.filter())
+async def report_callbacks(callback: CallbackQuery, callback_data: RepCB):
     await callback.answer()
     uid = callback.from_user.id
     r = reports.get_report(uid)
@@ -106,54 +107,85 @@ async def report_callbacks(callback: CallbackQuery):
         await safe_send_markdown(callback.message, "Сессия отчёта не активна. Нажми кнопку ещё раз.")
         return
 
-    if callback.data == "rep:cancel":
+    act = callback_data.action
+
+    if act == "cancel":
         reports.cancel_report(uid)
         await safe_send_markdown(callback.message, "Отчёт отменён.")
         return
 
-    if callback.data == "rep:restart":
+    if act == "restart":
         reports.start_report(uid)
         prompt = await reports.next_prompt(reports.get_report(uid))
         await safe_send_markdown(callback.message, "Ок, начнём заново.\n" + prompt)
         return
 
-    if callback.data == "rep:send":
+    if act == "edit_menu":
+        draft = reports.render_report_text(r, public_channel_url=PUBLIC_CHANNEL_URL)
+        await safe_send_markdown(callback.message, "Выбери, что исправить:\n\n" + draft, reply_markup=reports.keyboard_edit_menu())
+        return
+
+    if act == "back":
+        draft = reports.render_report_text(r, public_channel_url=PUBLIC_CHANNEL_URL)
+        await safe_send_markdown(callback.message, "Черновик:\n\n" + draft, reply_markup=reports.keyboard_confirm_and_edit())
+        return
+
+    if act == "edit_geo":
+        # special: ждём location
+        r["step"] = reports.STEP_EDIT
+        r["edit_field"] = "geo"
+        await safe_send_markdown(callback.message, "Ок. Отправь новую геолокацию (скрепка → Геопозиция).")
+        return
+
+    if act == "edit":
+        field_map = {
+            "place": "place_text",
+            "method": "method",
+            "bait": "bait",
+            "results": "results",
+            "notes": "notes",
+        }
+        field_key = field_map.get(callback_data.field)
+        if not field_key:
+            await safe_send_markdown(callback.message, "Не понял, что редактировать.")
+            return
+        r["step"] = reports.STEP_EDIT
+        r["edit_field"] = field_key
+        await safe_send_markdown(callback.message, reports.edit_prompt(field_key))
+        return
+
+    if act == "send":
         if not REPORT_TARGET_CHANNEL:
             await safe_send_markdown(callback.message, "⚠️ REPORT_TARGET_CHANNEL не настроен в .env")
             return
 
         ok_req, why = reports.validate_required(r)
         if not ok_req:
-            await safe_send_markdown(callback.message, f"⚠️ {why}\nДополни отчёт, пожалуйста.")
+            await safe_send_markdown(callback.message, f"⚠️ {why}\nНажми «Править поля» и дополни.")
             return
 
         draft = reports.render_report_text(r, public_channel_url=PUBLIC_CHANNEL_URL)
-
         ok_mod, reason = await reports.moderate_text_openai(client, draft)
         if not ok_mod:
-            await safe_send_markdown(callback.message, f"⚠️ Отчёт не прошёл модерацию: {reason}\nПерепиши текст без нарушений и попробуй снова.")
-            r["step"] = reports.STEP_NOTES
+            await safe_send_markdown(callback.message, f"⚠️ Отчёт не прошёл модерацию: {reason}\nНажми «Править поля» и исправь текст.")
             return
 
         bot = callback.message.bot
         media = r.get("media") or []
 
         try:
-            # 1) медиа (если есть)
             for item in media[:10]:
                 if item["type"] == "photo":
                     await bot.send_photo(chat_id=REPORT_TARGET_CHANNEL, photo=item["file_id"])
                 elif item["type"] == "video":
                     await bot.send_video(chat_id=REPORT_TARGET_CHANNEL, video=item["file_id"])
 
-            # 2) текст поста
             await bot.send_message(chat_id=REPORT_TARGET_CHANNEL, text=draft, parse_mode="Markdown")
-
             reports.cancel_report(uid)
             await safe_send_markdown(callback.message, "✅ Отчёт опубликован в канале.")
         except Exception:
             logging.exception("send to channel failed")
-            await safe_send_markdown(callback.message, "⚠️ Не удалось отправить в канал. Проверь: бот админ канала и есть право постинга.")
+            await safe_send_markdown(callback.message, "⚠️ Не удалось отправить в канал. Проверь права бота в канале.")
         return
 
 
@@ -210,9 +242,20 @@ async def handle_location(message: Message):
     if not reports.has_active_report(uid):
         return
     r = reports.get_report(uid)
-    if not r or r.get("step") != reports.STEP_GEO:
+    if not r:
         return
+    # geo либо на шаге geo мастера, либо в edit_geo
+    if r.get("step") not in (reports.STEP_GEO, reports.STEP_EDIT):
+        return
+
     txt = reports.handle_report_location(r, message.location.latitude, message.location.longitude)
+
+    # если мы были в редактировании — показываем черновик
+    if r.get("step") == reports.STEP_CONFIRM:
+        draft = reports.render_report_text(r, public_channel_url=PUBLIC_CHANNEL_URL)
+        await safe_send_markdown(message, "Черновик:\n\n" + draft, reply_markup=reports.keyboard_confirm_and_edit())
+        return
+
     await safe_send_markdown(message, txt)
 
 
@@ -221,14 +264,15 @@ async def handle_text(message: Message):
     text = message.text or ""
     uid = message.from_user.id
 
-    # отчётный мастер
+    # отчётный мастер (включая редактирование)
     if reports.has_active_report(uid):
         r = reports.get_report(uid)
         reply = await reports.handle_report_text_input(r, text)
 
         if r.get("step") == reports.STEP_CONFIRM:
             draft = reports.render_report_text(r, public_channel_url=PUBLIC_CHANNEL_URL)
-            await safe_send_markdown(message, "Черновик:\n\n" + draft, reply_markup=reports.report_keyboard_confirm())
+            # Если это был ответ после редактирования — покажем черновик
+            await safe_send_markdown(message, (reply or "Черновик:\n") + "\n\n" + draft, reply_markup=reports.keyboard_confirm_and_edit())
         else:
             if reply:
                 await safe_send_markdown(message, reply)
@@ -312,14 +356,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-
-
-
-
-
-
-
-
 
 
 
