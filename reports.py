@@ -1,7 +1,6 @@
 import datetime
 import json
-import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -22,9 +21,9 @@ STEP_CONFIRM = "confirm"
 def start_report(user_id: int) -> Dict[str, Any]:
     REPORT_SESSIONS[user_id] = {
         "step": STEP_MEDIA,
-        "media": [],  # list of {"type":"photo|video", "file_id": "..."}
+        "media": [],      # [{"type":"photo|video","file_id":"..."}]
         "place_text": "",
-        "geo": None,  # {"lat":..,"lon":..}
+        "geo": None,      # {"lat":..,"lon":..}
         "method": "",
         "bait": "",
         "results": "",
@@ -55,37 +54,52 @@ def report_keyboard_confirm() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def render_report_text(r: Dict[str, Any]) -> str:
+def _geo_line(geo: Optional[Dict[str, Any]]) -> str:
+    if isinstance(geo, dict) and "lat" in geo and "lon" in geo:
+        return f"{geo['lat']:.5f}, {geo['lon']:.5f}"
+    return "—"
+
+
+def render_report_text(r: Dict[str, Any], public_channel_url: str = "") -> str:
     place = r.get("place_text") or "—"
     method = r.get("method") or "—"
     bait = r.get("bait") or "—"
     results = r.get("results") or "—"
     notes = r.get("notes") or "—"
-    geo = r.get("geo")
 
-    geo_line = "—"
-    if isinstance(geo, dict) and "lat" in geo and "lon" in geo:
-        geo_line = f"{geo['lat']:.5f}, {geo['lon']:.5f}"
+    tail = ""
+    if public_channel_url:
+        tail = f"\n\n🔗 Канал: {public_channel_url}"
 
     text = (
         "🎣 **Рыболовный отчёт**\n"
         f"📍 **Место:** {place}\n"
-        f"🧭 **Координаты:** {geo_line}\n"
-        f"🧊/🚣 **Способ:** {method}\n"
-        f"🪱 **На что ловил:** {bait}\n"
-        f"🐟 **Результат:** {results}\n"
+        f"🧭 **Координаты:** {_geo_line(r.get('geo'))}\n"
+        f"🧊/🚣 **Способ ловли:** {method}\n"
+        f"🪱 **Насадка/приманки:** {bait}\n"
+        f"🐟 **Улов/результат:** {results}\n"
         f"📝 **Комментарий:** {notes}\n"
         "\n"
-        "_Отчёт отправлен анонимно._"
+        "_Отправлено анонимно._"
+        f"{tail}"
     )
     return text
 
 
+def validate_required(r: Dict[str, Any]) -> Tuple[bool, str]:
+    # Минимально необходимые поля: место, способ, приманки, результат
+    if not (r.get("place_text") or "").strip():
+        return False, "Не заполнено поле: место."
+    if not (r.get("method") or "").strip():
+        return False, "Не заполнено поле: способ ловли."
+    if not (r.get("bait") or "").strip():
+        return False, "Не заполнено поле: насадка/приманки."
+    if not (r.get("results") or "").strip():
+        return False, "Не заполнено поле: улов/результат."
+    return True, ""
+
+
 async def moderate_text_openai(client: AsyncOpenAI, text: str) -> Tuple[bool, str]:
-    """
-    Простая модерация через LLM-классификатор: мат/политика/призывы/экстремизм.
-    Если не ок — вернуть ok=False и причину.
-    """
     system = """
 Ты модератор контента.
 Запрещено: мат, оскорбления, политическая агитация, призывы к насилию/ненависти, запрещенные призывы.
@@ -102,30 +116,29 @@ async def moderate_text_openai(client: AsyncOpenAI, text: str) -> Tuple[bool, st
         temperature=0,
     )
     data = json.loads(resp.choices[0].message.content)
-    ok = bool(data.get("ok"))
-    reason = (data.get("reason") or "").strip()
-    return ok, reason
+    return bool(data.get("ok")), (data.get("reason") or "").strip()
 
 
 async def next_prompt(r: Dict[str, Any]) -> str:
     step = r.get("step")
     if step == STEP_MEDIA:
         return (
-            "Пришли фото/видео с рыбалки (можно несколько). Когда закончишь — напиши `готово`.\n"
+            "Шаг 1/7. Пришли фото/видео (можно несколько).\n"
+            "Когда закончишь — напиши `готово`.\n"
             "Если медиа нет — напиши `без фото`."
         )
     if step == STEP_PLACE:
-        return "Напиши место (водоём/район/населённый пункт)."
+        return "Шаг 2/7. Напиши место (водоём/район/ориентир)."
     if step == STEP_GEO:
-        return "Отправь геолокацию (скрепка → Геопозиция) или напиши `пропустить`."
+        return "Шаг 3/7. Отправь геолокацию (скрепка → Геопозиция) или напиши `пропустить`."
     if step == STEP_METHOD:
-        return "Как ловил? (со льда / с берега / с лодки, снасть: мормышка/фидер/спиннинг и т.д.)"
+        return "Шаг 4/7. Как ловил? (со льда/с берега/с лодки + снасть: мормышка/фидер/спиннинг...)"
     if step == STEP_BAIT:
-        return "На что ловил? (насадка/приманки/прикормка — кратко)"
+        return "Шаг 5/7. На что ловил? (насадка/приманки/прикормка — кратко)"
     if step == STEP_RESULTS:
-        return "Результат: что поймал и сколько (можно примерно)."
+        return "Шаг 6/7. Улов/результат: что поймал и сколько (можно примерно)."
     if step == STEP_NOTES:
-        return "Комментарий: условия, лёд/глубина/ветер, что сработало/нет."
+        return "Шаг 7/7. Комментарий: условия, лёд/глубина/ветер, что сработало/нет."
     return "Ок."
 
 
@@ -175,8 +188,7 @@ async def handle_report_text_input(r: Dict[str, Any], text: str) -> Optional[str
     if step == STEP_NOTES:
         r["notes"] = t
         _advance_step(r, STEP_CONFIRM)
-        draft = render_report_text(r)
-        return "Черновик отчёта:\n\n" + draft
+        return "Черновик отчёта готов. Проверь и отправляй."
 
     return None
 
@@ -184,4 +196,5 @@ async def handle_report_text_input(r: Dict[str, Any], text: str) -> Optional[str
 def handle_report_location(r: Dict[str, Any], lat: float, lon: float) -> str:
     r["geo"] = {"lat": float(lat), "lon": float(lon)}
     _advance_step(r, STEP_METHOD)
-    return "Локация принята.\n" + "Теперь: " + "Как ловил? (со льда / с берега / с лодки, снасть...)"
+    return "Локация принята.\n" + "Дальше: " + "Как ловил? (со льда/с берега/с лодки + снасть...)"
+
