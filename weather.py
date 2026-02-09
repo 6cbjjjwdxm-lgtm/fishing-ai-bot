@@ -17,7 +17,7 @@ def get_moon_phase() -> str:
     phases = ["🌑 Новолуние", "🌒 Растущая", "🌓 1-я четверть", "🌔 Растущая",
               "🌕 Полнолуние", "🌖 Убывающая", "🌗 Последняя четверть", "🌘 Старая"]
     days = (datetime.date.today() - datetime.date(2000, 1, 6)).days
-    return phases[int(((days % 29.53) / 29.53) * 8) % 8
+    return phases[int(((days % 29.53) / 29.53) * 8) % 8]
 
 
 def season_by_date(d: datetime.date) -> str:
@@ -43,37 +43,18 @@ def _clean_city_tokens(s: str) -> str:
 
 
 def _guess_nominative_ru(word: str) -> str:
-    """
-    Очень грубая эвристика: 'Москве'->'Москва', 'Подольске'->'Подольск', 'Калуге'->'Калуга'.
-    Не лингвистика, но на 90% городов работает.
-    """
     w = (word or "").strip()
     lw = w.lower()
-
-    # если слово короткое — не трогаем
     if len(w) <= 3:
         return w
-
-    # типовые окончания предложного/дательного
-    # Москве -> Москва
     if lw.endswith("ве") and len(w) >= 5:
-        return w[:-2] + "ва"
-    # Туле -> Тула (часто)
-    if lw.endswith("ле") and len(w) >= 4:
-        return w[:-1] + "а"
-    # Калуге -> Калуга
+        return w[:-2] + "ва"   # Москве -> Москва
     if lw.endswith("ге") and len(w) >= 4:
-        return w[:-1] + "а"
-    # Подольске -> Подольск
+        return w[:-1] + "а"    # Калуге -> Калуга
     if lw.endswith("ске") and len(w) >= 6:
-        return w[:-2]  # убираем "е": Подольск-е -> Подольск
-    # Москве/Пскове/Кирове: "...ве" уже покрыли, "...ове" тоже иногда
-    if lw.endswith("ове") and len(w) >= 6:
-        return w[:-2]  # оставим без "е"
-    # общем: ...е -> убираем последнюю "е"
+        return w[:-2]          # Подольске -> Подольск
     if lw.endswith("е") and len(w) >= 5:
-        return w[:-1]
-
+        return w[:-1]          # Туле -> Тул
     return w
 
 
@@ -81,9 +62,7 @@ def _city_variants(city: str) -> List[str]:
     city = _clean_city_tokens(city)
     if not city:
         return []
-
     parts = city.split()
-    # преобразуем каждое слово (для "Нижнем Новгороде" будет грязно, но лучше чем ничего)
     guessed = " ".join(_guess_nominative_ru(p) for p in parts)
 
     variants = []
@@ -92,7 +71,6 @@ def _city_variants(city: str) -> List[str]:
         if v and v not in variants:
             variants.append(v)
 
-    # ещё вариант: взять последнее слово (иногда люди пишут "в Москве на реке")
     if len(parts) > 1:
         last = parts[-1]
         lastg = _guess_nominative_ru(last)
@@ -104,93 +82,86 @@ def _city_variants(city: str) -> List[str]:
     return variants
 
 
-async def _geocode_request(q: str, limit: int = 1) -> Tuple[int, str]:
-    url = "http://api.openweathermap.org/geo/1.0/direct"
-    params = {"q": q, "limit": max(1, min(int(limit), 5)), "appid": OPENWEATHER_API_KEY}
-
+async def _get_text(url: str, params: Dict[str, Any]) -> Tuple[int, str]:
     timeout = aiohttp.ClientTimeout(total=10)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(url, params=params) as r:
-            body = await r.text()
-            return r.status, body
+            return r.status, await r.text()
 
 
-async def geocode_city(city: str, country: str = "RU", limit: int = 1) -> Optional[Dict[str, Any]]:
+async def geocode_any(name: str, country: str = "RU", limit: int = 5) -> Optional[Dict[str, Any]]:
     """
-    Direct geocoding: city -> lat/lon. [web:308][web:309]
+    Direct geocoding: name -> lat/lon. Можно limit до 5. [web:309]
     """
     if not OPENWEATHER_API_KEY:
         logging.warning("GEOCODE skipped: missing OPENWEATHER_API_KEY")
         return None
 
-    variants = _city_variants(city)
+    url = "http://api.openweathermap.org/geo/1.0/direct"
+    variants = _city_variants(name)
     if not variants:
         return None
 
     queries = []
     for v in variants:
-        # 1) с RU
         queries.append(f"{v},{country}")
-        # 2) без RU (иногда срабатывает лучше)
         queries.append(v)
 
     for q in queries:
-        status, body = await _geocode_request(q=q, limit=limit)
-        logging.warning("GEOCODE request q=%s status=%s", q, status)
-        logging.warning("GEOCODE body=%s", body[:300])
-
+        status, body = await _get_text(url, {"q": q, "limit": max(1, min(int(limit), 5)), "appid": OPENWEATHER_API_KEY})
+        logging.warning("GEOCODE q=%s status=%s body=%s", q, status, body[:200])
         if status != 200:
             continue
-
         try:
             data = json.loads(body)
         except Exception:
             continue
-
         if isinstance(data, list) and data:
             item = data[0]
             if "lat" in item and "lon" in item:
                 item["_q_used"] = q
                 return item
+    return None
 
+
+async def reverse_geocode(lat: float, lon: float, limit: int = 1) -> Optional[Dict[str, Any]]:
+    """
+    Reverse geocoding: lat/lon -> ближайшее место. [web:309]
+    """
+    if not OPENWEATHER_API_KEY:
+        return None
+    url = "http://api.openweathermap.org/geo/1.0/reverse"
+    status, body = await _get_text(url, {"lat": lat, "lon": lon, "limit": max(1, min(int(limit), 5)), "appid": OPENWEATHER_API_KEY})
+    logging.warning("REVERSE lat=%s lon=%s status=%s body=%s", lat, lon, status, body[:200])
+    if status != 200:
+        return None
+    try:
+        data = json.loads(body)
+    except Exception:
+        return None
+    if isinstance(data, list) and data:
+        return data[0]
     return None
 
 
 async def fetch_forecast_by_latlon(lat: float, lon: float) -> Optional[Dict[str, Any]]:
-    """
-    5 day / 3 hour forecast by coordinates. [web:160]
-    """
-    if not OPENWEATHER_API_KEY:
-        logging.warning("FORECAST skipped: missing OPENWEATHER_API_KEY")
-        return None
-
     url = "https://api.openweathermap.org/data/2.5/forecast"
-    params = {
+    if not OPENWEATHER_API_KEY:
+        return None
+    status, body = await _get_text(url, {
         "lat": lat, "lon": lon,
         "appid": OPENWEATHER_API_KEY,
         "units": "metric",
         "lang": "ru",
-    }
-
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, params=params) as r:
-            body = await r.text()
-            logging.warning("FORECAST request lat=%s lon=%s status=%s", lat, lon, r.status)
-            logging.warning("FORECAST body=%s", body[:300])
-
-            if r.status != 200:
-                return None
-
-            try:
-                data = json.loads(body)
-            except Exception:
-                return None
-
-            if data.get("cod") == "200":
-                return data
-
-    return None
+    })
+    logging.warning("FORECAST lat=%s lon=%s status=%s body=%s", lat, lon, status, body[:200])
+    if status != 200:
+        return None
+    try:
+        data = json.loads(body)
+    except Exception:
+        return None
+    return data if data.get("cod") == "200" else None
 
 
 def group_by_day(forecast_list: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -198,25 +169,21 @@ def group_by_day(forecast_list: List[Dict[str, Any]]) -> Dict[str, List[Dict[str
     for item in forecast_list or []:
         dt_txt = item.get("dt_txt") or ""
         day = dt_txt.split(" ")[0] if " " in dt_txt else ""
-        if not day:
-            continue
-        by_day.setdefault(day, []).append(item)
+        if day:
+            by_day.setdefault(day, []).append(item)
     return by_day
 
 
 def day_aggregate(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not items:
         return None
-
     temps, pressures, winds, descs = [], [], [], []
     has_rain, has_snow = False, False
-
     for it in items:
         main = it.get("main") or {}
         wind = it.get("wind") or {}
         weather = (it.get("weather") or [{}])
         desc = (weather[0].get("description") or "").strip()
-
         if main.get("temp") is not None:
             temps.append(float(main["temp"]))
         if main.get("pressure") is not None:
@@ -225,22 +192,15 @@ def day_aggregate(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             winds.append(float(wind["speed"]))
         if desc:
             descs.append(desc)
-
         if isinstance(it.get("rain"), dict):
             has_rain = True
         if isinstance(it.get("snow"), dict):
             has_snow = True
 
-    def avg(xs):
-        return (sum(xs) / len(xs)) if xs else None
+    def avg(xs): return (sum(xs) / len(xs)) if xs else None
 
     desc = max(set(descs), key=descs.count) if descs else ""
-    precip = "none"
-    if has_snow:
-        precip = "snow"
-    elif has_rain:
-        precip = "rain"
-
+    precip = "snow" if has_snow else ("rain" if has_rain else "none")
     return {
         "temp_c": avg(temps),
         "pressure_mm": hpa_to_mm(avg(pressures)) if pressures else None,
@@ -250,25 +210,10 @@ def day_aggregate(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     }
 
 
-async def _resolve_and_fetch(city: str) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    geo = await geocode_city(city)
-    if not geo:
-        logging.warning("RESOLVE FAILED city=%s variants=%s", city, _city_variants(city))
+async def forecast_by_coords(lat: float, lon: float, day_offset: int) -> Optional[Dict[str, Any]]:
+    data = await fetch_forecast_by_latlon(lat, lon)
+    if not data:
         return None
-
-    fc = await fetch_forecast_by_latlon(float(geo["lat"]), float(geo["lon"]))
-    if not fc:
-        logging.warning("FORECAST FAILED q_used=%s lat=%s lon=%s", geo.get("_q_used"), geo.get("lat"), geo.get("lon"))
-        return None
-
-    return geo, fc
-
-
-async def get_weather_for_day(city: str, day_offset: int) -> Optional[Dict[str, Any]]:
-    res = await _resolve_and_fetch(city)
-    if not res:
-        return None
-    geo, data = res
 
     forecasts = data.get("list") or []
     target_date = datetime.date.today() + datetime.timedelta(days=max(0, int(day_offset)))
@@ -277,12 +222,13 @@ async def get_weather_for_day(city: str, day_offset: int) -> Optional[Dict[str, 
     day_items = [f for f in forecasts if target_str in (f.get("dt_txt") or "")]
     if not day_items:
         return None
-
     best = next((f for f in day_items if "12:00:00" in (f.get("dt_txt") or "")), day_items[0])
 
     main = best.get("main") or {}
     wind = best.get("wind") or {}
     weather = (best.get("weather") or [{}])
+
+    nearest = await reverse_geocode(lat, lon, limit=1)
 
     return {
         "date": target_str,
@@ -293,26 +239,33 @@ async def get_weather_for_day(city: str, day_offset: int) -> Optional[Dict[str, 
         "moon": get_moon_phase(),
         "season": season_by_date(target_date),
         "resolved": {
-            "name": geo.get("name"),
-            "lat": geo.get("lat"),
-            "lon": geo.get("lon"),
-            "country": geo.get("country"),
-            "q_used": geo.get("_q_used"),
+            "lat": lat, "lon": lon,
+            "nearest_name": (nearest or {}).get("name"),
+            "nearest_country": (nearest or {}).get("country"),
         }
     }
 
 
-async def get_weather_5days(city: str) -> Optional[List[Dict[str, Any]]]:
-    res = await _resolve_and_fetch(city)
-    if not res:
+async def get_weather_for_day(place: str, day_offset: int) -> Optional[Dict[str, Any]]:
+    geo = await geocode_any(place)
+    if not geo:
         return None
-    geo, data = res
+    return await forecast_by_coords(float(geo["lat"]), float(geo["lon"]), day_offset)
+
+
+async def get_weather_5days(place: str) -> Optional[List[Dict[str, Any]]]:
+    geo = await geocode_any(place)
+    if not geo:
+        return None
+    data = await fetch_forecast_by_latlon(float(geo["lat"]), float(geo["lon"]))
+    if not data:
+        return None
 
     forecasts = data.get("list") or []
     by_day = group_by_day(forecasts)
     days = sorted(by_day.keys())[:5]
-
     out: List[Dict[str, Any]] = []
+
     for day in days:
         agg = day_aggregate(by_day[day])
         if not agg:
@@ -322,15 +275,10 @@ async def get_weather_5days(city: str) -> Optional[List[Dict[str, Any]]]:
             "date": day,
             "moon": get_moon_phase(),
             "season": season_by_date(d),
-            "resolved": {
-                "name": geo.get("name"),
-                "lat": geo.get("lat"),
-                "lon": geo.get("lon"),
-                "country": geo.get("country"),
-                "q_used": geo.get("_q_used"),
-            }
+            "resolved": {"name": geo.get("name"), "lat": geo.get("lat"), "lon": geo.get("lon"), "q_used": geo.get("_q_used")},
         })
         out.append(agg)
 
     return out
+
 
