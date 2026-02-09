@@ -46,6 +46,14 @@ def extract_date_iso(text: str) -> Optional[str]:
     except Exception:
         return None
 
+WATER_WORDS = [
+    "река","реке","озеро","озере","пруд","пруду","водохранилище","вдхр","карьер","канал",
+    "омут","залив","бухта","плотина","гэс","на оке","на волге","на москве-реке","москва-река"
+]
+
+def looks_like_waterbody_query(text: str) -> bool:
+    t = (text or "").lower()
+    return any(w in t for w in WATER_WORDS)
 
 def extract_city_simple(query: str) -> str:
     """
