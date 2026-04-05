@@ -371,10 +371,13 @@ async def handle_text(message: Message):
         now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
         pr_text = await generate_pr_texts(client, now.month)
         # Отправляем только админу — это не идёт в канал
-        await message.answer(
-            "📲 *Тексты для ручного размещения в рыболовных чатах:*\n\n" + pr_text,
-            parse_mode="Markdown"
-        )
+        # Отправляем без parse_mode — GPT часто генерирует незакрытые * и _
+        header = "📲 Тексты для ручного размещения в рыболовных чатах:\n\n"
+        full_text = header + pr_text
+        # Длинный текст — отправляем пакетами по 4000 символов (лимит Telegram на сообщение)
+        chunk_size = 4000
+        for i in range(0, len(full_text), chunk_size):
+            await message.answer(full_text[i:i + chunk_size])
         return
 
     # 1) мастер отчёта
