@@ -523,7 +523,10 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
 
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
+
+    # Сбрасываем webhook и ждём — это убивает предыдущий polling-сеанс на серверах Telegram
     await bot.delete_webhook(drop_pending_updates=True)
+    await asyncio.sleep(2)
 
     # Запускаем веб-сервер (для Render healthcheck)
     asyncio.create_task(start_web_server())
@@ -539,9 +542,13 @@ async def main():
     )
 
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
     finally:
         scheduler.shutdown()
+        await bot.session.close()
 
 
 if __name__ == "__main__":
