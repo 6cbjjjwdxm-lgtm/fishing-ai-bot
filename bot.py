@@ -36,6 +36,8 @@ from ai_logic import (
 from content_factory import (
     publish_daily_post,
     publish_monthly_plan_preview,
+    publish_viral_post,
+    generate_pr_texts,
     POST_HOUR_UTC,
     POST_MINUTE_UTC,
     CONTENT_CHANNEL,
@@ -352,6 +354,29 @@ async def handle_text(message: Message):
             await safe_send_markdown(message, "❌ Не удалось опубликовать. Проверь логи.")
         return
 
+    # 0d) Admin: виральный пост
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*viral_now":
+        bot = message.bot
+        await safe_send_markdown(message, "⏳ Генерирую виральный пост...")
+        ok = await publish_viral_post(bot, client)
+        if ok:
+            await safe_send_markdown(message, f"✅ Виральный пост опубликован в {CONTENT_CHANNEL}")
+        else:
+            await safe_send_markdown(message, "❌ Не удалось опубликовать.")
+        return
+
+    # 0e) Admin: генерация PR-текстов для размещения в чатах
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*pr":
+        await safe_send_markdown(message, "⏳ Генерирую тексты для продвижения...")
+        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+        pr_text = await generate_pr_texts(client, now.month)
+        # Отправляем только админу — это не идёт в канал
+        await message.answer(
+            "📲 *Тексты для ручного размещения в рыболовных чатах:*\n\n" + pr_text,
+            parse_mode="Markdown"
+        )
+        return
+
     # 1) мастер отчёта
     if reports.has_active_report(uid):
         r = reports.get_report(uid)
@@ -498,6 +523,18 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot, client],
         id="monthly_plan",
         name="Monthly content plan preview",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # Виральный пост по воскресеньям в 12:00 МСК (09:00 UTC)
+    viral_hour = min(23, POST_HOUR_UTC + 2)
+    scheduler.add_job(
+        publish_viral_post,
+        trigger=CronTrigger(day_of_week="sun", hour=viral_hour, minute=POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="viral_post",
+        name="Weekly viral post (Sunday)",
         replace_existing=True,
         misfire_grace_time=3600,
     )

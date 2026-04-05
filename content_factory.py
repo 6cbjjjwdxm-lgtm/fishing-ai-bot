@@ -30,6 +30,67 @@ UNSPLASH_ACCESS_KEY = (os.getenv("UNSPLASH_ACCESS_KEY") or "").strip()
 POST_HOUR_UTC = int(os.getenv("POST_HOUR_UTC", "7"))
 POST_MINUTE_UTC = int(os.getenv("POST_MINUTE_UTC", "0"))
 
+# ────────────────────────────── SEO хэштеги по сезонам ──────────────────────────────
+
+# Высокочастотные хэштеги по сезонам — часто ищут в Telegram
+SEO_TAGS: Dict[str, List[str]] = {
+    "зима": [
+        "#зимняярыбалка", "#рыбалкасольда", "#ледоваярыбалка", "#мормышка",
+        "#жерлица", "#зимнийокунь", "#первыйлед", "#рыбалкамосква",
+        "#подмосковьерыбалка", "#рыбалкаподмосковье",
+    ],
+    "весна": [
+        "#весенняярыбалка", "#щукавесной", "#спиннингвесной", "#жорщуки",
+        "#рыбалкамосква", "#подмосковьерыбалка", "#открытиесезона",
+        "#спиннингподмосковье", "#голавльнахлыст", "#карпвесной",
+    ],
+    "лето": [
+        "#летняярыбалка", "#рыбалкалето", "#ночнаярыбалка", "#карпвподмосковье",
+        "#сомнарыбалке", "#рыбалкамосква", "#лещнаджиг", "#поплавоклето",
+        "#подмосковьерыбалка", "#рыбалкаподмосковье",
+    ],
+    "осень": [
+        "#осенняярыбалка", "#судакосень", "#щукаосень", "#осеннийжор",
+        "#рыбалкамосква", "#подмосковьерыбалка", "#окуньосень",
+        "#налимосень", "#спиннингосень", "#джигосень",
+    ],
+}
+
+# Постоянные теги во всех постах
+SEO_CORE_TAGS = [
+    "#рыбалка", "#рыбак", "#фишинг", "#рыболов", "#подмосковье",
+    "#дневникрыбака", "#клевыйдвиж",
+]
+
+
+def get_seo_tags(month: int, topic: str) -> str:
+    """Генерирует оптимизированный набор хэштегов — постоянные + сезонные + видовые."""
+    season = get_season(month)
+    seasonal = SEO_TAGS.get(season, [])
+
+    # Видовые теги по теме
+    topic_l = topic.lower()
+    species_tags = []
+    if any(w in topic_l for w in ["щук", "щучье"]):
+        species_tags = ["#щука", "#пикефишинг"]
+    elif any(w in topic_l for w in ["судак"]):
+        species_tags = ["#судак", "#судакподмосковье"]
+    elif any(w in topic_l for w in ["окунь", "окуня"]):
+        species_tags = ["#окунь", "#перчфишинг"]
+    elif any(w in topic_l for w in ["карп"]):
+        species_tags = ["#карп", "#карпфишинг"]
+    elif any(w in topic_l for w in ["лещ"]):
+        species_tags = ["#лещ", "#фидер"]
+    elif any(w in topic_l for w in ["налим"]):
+        species_tags = ["#налим"]
+    elif any(w in topic_l for w in ["спиннинг", "воблер", "джиг"]):
+        species_tags = ["#спиннинг", "#люрефишинг"]
+
+    # Сбираем без дублей, макс 8 штук
+    all_tags = list(dict.fromkeys(SEO_CORE_TAGS + species_tags + random.sample(seasonal, min(2, len(seasonal)))))
+    return " ".join(all_tags[:8])
+
+
 # ────────────────────────────── Сезоны ──────────────────────────────
 
 def get_season(month: int) -> str:
@@ -771,3 +832,137 @@ async def publish_monthly_plan_preview(bot, client: AsyncOpenAI) -> bool:
     except Exception as e:
         logger.error("Failed to publish monthly plan: %s", e)
         return False
+
+
+# ────────────────────────────── ВИРАЛЬНЫЕ ПОСТЫ (воскресенье) ──────────────────────────────
+
+VIRAL_FORMATS = [
+    "poll",       # опрос
+    "riddle",     # загадка про рыбу/место
+    "contest",    # мини-конкурс
+    "hot_take",   # провокация/спорный вопрос
+]
+
+VIRAL_SYSTEM = """
+Ты — редактор Telegram-канала @dnevnikrib о рыбалке в Московском регионе.
+
+Твоя задача — создать виральный пост выходного дня. Цель — максимально вовлечь читателя в реакцию, комментарий, отправку другу.
+
+ПРАВИЛА:
+1. ДЛИНА: до 700 символов
+2. ФОРМАТ poll: задай чёткий вопрос с 2-4 вариантами в конце, призвав голосовать цифрами (1️⃣ 2️⃣ 3️⃣)
+3. ФОРМАТ riddle: загадка про водоём, рыбу или снасть — ответ в спойлере или пишут в комментах
+4. ФОРМАТ contest: мини-активность (отправь другу, напиши лучший улов, разогрей дискуссию)
+5. ФОРМАТ hot_take: спорное утверждение о рыбалке, которое заставляет спорить
+6. В конце — подпись: @dnevnikrib — Дневник рыбака + хэштеги #дневникрыбака #клевыйдвиж
+7. ЭМОДЖИ: активно, 5-8 штук
+""".strip()
+
+
+async def publish_viral_post(bot, client: AsyncOpenAI) -> bool:
+    """
+    Виральный пост по воскресеньям.
+    Чередуется между форматами: опрос, загадка, конкурс, спорцы.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+    month = now.month
+    week_num = now.isocalendar()[1]
+    season = get_season(month)
+
+    # Чередуем форматы по номеру недели
+    fmt = VIRAL_FORMATS[week_num % len(VIRAL_FORMATS)]
+
+    format_hints = {
+        "poll": "опрос с голосованием цифрами 1️⃣ 2️⃣ 3️⃣",
+        "riddle": "загадка про водоём, рыбу или снасть — ответ запрятан в спойлере",
+        "contest": "вовлекающий мини-конкурс (отправь другу / напиши лучший улов)",
+        "hot_take": "спорное утверждение о рыбалке, которое заставляет спорить",
+    }
+
+    prompt = (
+        f"Сезон: {season}, месяц: {month}.\n"
+        f"Формат: {format_hints[fmt]}\n"
+        f"Создай виральный пост для рыболовов Подмосковья. "
+        f"В конце: @dnevnikrib — Дневник рыбака / #дневникрыбака #клевыйдвиж"
+    )
+
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": VIRAL_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.85,
+            max_tokens=400,
+        )
+        text = _trim_caption(_strip_markdown(resp.choices[0].message.content.strip()))
+    except Exception as e:
+        logger.error("Viral post generation failed: %s", e)
+        return False
+
+    photo_url = await get_photo_url(f"fishing {season} fun")
+    try:
+        if photo_url:
+            await bot.send_photo(chat_id=CONTENT_CHANNEL, photo=photo_url, caption=text)
+        else:
+            await bot.send_message(chat_id=CONTENT_CHANNEL, text=text)
+        logger.info("Viral post published (format=%s)", fmt)
+        return True
+    except Exception as e:
+        logger.error("Viral post send failed: %s", e)
+        return False
+
+
+# ────────────────────────────── ВЗАИМНЫЙ ПИАР (*pr) ──────────────────────────────
+
+PR_SYSTEM = """
+Ты помогаешь развивать Telegram-канал @dnevnikrib о рыбалке в Московском регионе.
+
+Твоя задача — составить тексты для ручного продвижения в чужих тематических чатах/группах.
+
+Ты готовишь ТРИ варианта текста для разных площадок:
+
+1. Короткий (3-4 предложения): для быстрого ответа в чате когда кто-то спрашивает про места рыбалки
+2. Средний (7-8 предложений): участие в разговоре + упоминание канала
+3. Пост взаимного пиара (до 15 предложений): отдельный пост о канале
+
+ПРАВИЛА:
+- БЕЗ спама! Текст должен выглядеть как обычное участие в разговоре, а не реклама
+- Органично вплетай упоминание канала в конце
+- Во всех вариантах отрази упоминание ИИ ассистента для рыбаловов (@expertfishing_bot)
+- Разделяй варианты четкими заголовками: "ВАРИАНТ 1", "ВАРИАНТ 2", "ВАРИАНТ 3"
+""".strip()
+
+
+async def generate_pr_texts(client: AsyncOpenAI, month: int) -> str:
+    """
+    Генерирует 3 варианта пр-текстов для ручного размещения в чатах.
+    """
+    season = get_season(month)
+    month_names = {
+        1: "январь", 2: "февраль", 3: "март", 4: "апрель",
+        5: "май", 6: "июнь", 7: "июль", 8: "август",
+        9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь",
+    }
+
+    prompt = (
+        f"Сезон: {season}, месяц: {month_names.get(month, '')}.\n"
+        f"Подготовь 3 варианта текста для продвижения канала @dnevnikrib в тематических Telegram-чатах о рыбалке.\n"
+        f"Также упомяни @expertfishing_bot — ИИ-ассистент для рыбаловов (спроси про клёв, места, погоду)."
+    )
+
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": PR_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.8,
+            max_tokens=900,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error("PR text generation failed: %s", e)
+        return "Ошибка генерации. Попробуй ещё раз."
