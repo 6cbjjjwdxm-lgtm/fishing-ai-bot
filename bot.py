@@ -473,91 +473,63 @@ async def handle_text(message: Message):
     await safe_send_markdown(message, ans)
 
 
-async def start_web_server():
+
+
+async def on_startup(bot: Bot):
+    """Webhook регистрируется при старте."""
+    webhook_url = (os.getenv("WEBHOOK_URL") or "").strip()
+    if not webhook_url:
+        logging.error("WEBHOOK_URL не задан в окружении!")
+        return
+    await bot.set_webhook(
+        url=webhook_url,
+        drop_pending_updates=True,
+        allowed_updates=dp.resolve_used_update_types(),
+    )
+    logging.info("Webhook set: %s", webhook_url)
+
+
+async def on_shutdown(bot: Bot):
+    await bot.delete_webhook()
+    logging.info("Webhook deleted")
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
+
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+    bot = Bot(token=TELEGRAM_TOKEN)
+    scheduler = setup_scheduler(bot)
+
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
     app = web.Application()
     app.router.add_get("/", lambda r: web.Response(text="Bot is Alive"))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
 
+    # aiogram обрабатывает входящие апдейты на /webhook
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+    setup_application(app, dp, bot=bot)
 
-def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
-    """
-    Настраивает планировщик задач для контент-завода.
-    - Ежедневно в POST_HOUR_UTC:POST_MINUTE_UTC UTC публикует пост
-    - 1-го числа каждого месяца публикует анонс контент-плана
-    """
-    scheduler = AsyncIOScheduler(timezone="UTC")
-
-    # Ежедневный пост
-    scheduler.add_job(
-        publish_daily_post,
-        trigger=CronTrigger(hour=POST_HOUR_UTC, minute=POST_MINUTE_UTC, timezone="UTC"),
-        args=[bot, client],
-        id="daily_post",
-        name="Daily fishing post to channel",
-        replace_existing=True,
-        misfire_grace_time=3600,  # если пропустил — публикует в течение часа
-    )
-
-    # Анонс контент-плана 1-го числа каждого месяца (на час раньше обычного поста)
-    plan_hour = max(0, POST_HOUR_UTC - 1)
-    scheduler.add_job(
-        publish_monthly_plan_preview,
-        trigger=CronTrigger(day=1, hour=plan_hour, minute=POST_MINUTE_UTC, timezone="UTC"),
-        args=[bot, client],
-        id="monthly_plan",
-        name="Monthly content plan preview",
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
-
-    logging.info(
-        "Scheduler configured: daily post at %02d:%02d UTC, monthly plan on 1st at %02d:%02d UTC",
-        POST_HOUR_UTC, POST_MINUTE_UTC, plan_hour, POST_MINUTE_UTC
-    )
-    return scheduler
-
-
-async def main():
-    bot = Bot(token=TELEGRAM_TOKEN)
-
-    # Запускаем веб-сервер сразу — Render ждёт ответа на порте до завершения deploy
-    asyncio.create_task(start_web_server())
-
-    # Даём время предыдущему инстансу полностью завершить работу
-    logging.info("Waiting 15s for previous instance to shut down...")
-    await asyncio.sleep(15)
-
-    # Сбрасываем webhook и повторно ждём
-    await bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(3)
-
-    # Запускаем планировщик контент-завода
-    scheduler = setup_scheduler(bot)
-    scheduler.start()
-    logging.info(
-        "Content factory started. Channel: %s, Post time: %02d:%02d UTC (%02d:%02d MSK)",
-        CONTENT_CHANNEL,
-        POST_HOUR_UTC, POST_MINUTE_UTC,
-        (POST_HOUR_UTC + 3) % 24, POST_MINUTE_UTC
-    )
-
-    try:
-        await dp.start_polling(
-            bot,
-            allowed_updates=dp.resolve_used_update_types(),
+    async def _start_scheduler(app):
+        scheduler.start()
+        logging.info(
+            "Content factory started. Channel: %s, Post time: %02d:%02d UTC (%02d:%02d MSK)",
+            CONTENT_CHANNEL, POST_HOUR_UTC, POST_MINUTE_UTC,
+            (POST_HOUR_UTC + 3) % 24, POST_MINUTE_UTC,
         )
-    finally:
+
+    async def _stop_scheduler(app):
         scheduler.shutdown()
-        await bot.session.close()
+
+    app.on_startup.append(_start_scheduler)
+    app.on_cleanup.append(_stop_scheduler)
+
+    port = int(os.getenv("PORT", 10000))
+    logging.info("Starting on port %d (webhook mode)", port)
+    web.run_app(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    main()
