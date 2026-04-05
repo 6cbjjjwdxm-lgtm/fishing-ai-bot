@@ -562,8 +562,8 @@ async def on_startup(bot: Bot):
 
 
 async def on_shutdown(bot: Bot):
-    await bot.delete_webhook()
-    logging.info("Webhook deleted")
+    # Не удаляем webhook при остановке — новый инстанс уже перезаписал его на себя
+    logging.info("Bot shutdown, webhook kept active")
 
 
 def main():
