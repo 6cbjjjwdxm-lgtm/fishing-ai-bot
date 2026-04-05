@@ -16,6 +16,9 @@ from aiogram.types import Message, CallbackQuery
 
 from openai import AsyncOpenAI
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 import reports
 from reports import RepCB
 
@@ -29,6 +32,13 @@ from ai_logic import (
     assistant_text,
     assistant_with_photo,
     INTENT_FORECAST,
+)
+from content_factory import (
+    publish_daily_post,
+    publish_monthly_plan_preview,
+    POST_HOUR_UTC,
+    POST_MINUTE_UTC,
+    CONTENT_CHANNEL,
 )
 
 load_dotenv()
@@ -317,8 +327,29 @@ async def handle_text(message: Message):
 
     # 0) админ-команда для закрепа (если используешь)
     if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*pin":
-        # если у тебя уже есть функция pin — оставь свою; иначе просто ответим
         await safe_send_markdown(message, "Команда *pin включена, но функция pin не вставлена в этот main.py.")
+        return
+
+    # 0b) Admin: принудительная публикация поста (для теста)
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*post_now":
+        bot = message.bot
+        await safe_send_markdown(message, "⏳ Публикую тестовый пост в канал...")
+        ok = await publish_daily_post(bot, client)
+        if ok:
+            await safe_send_markdown(message, f"✅ Пост опубликован в {CONTENT_CHANNEL}")
+        else:
+            await safe_send_markdown(message, "❌ Не удалось опубликовать. Проверь логи.")
+        return
+
+    # 0c) Admin: публикация анонса плана на месяц
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*plan_now":
+        bot = message.bot
+        await safe_send_markdown(message, "⏳ Публикую анонс контент-плана...")
+        ok = await publish_monthly_plan_preview(bot, client)
+        if ok:
+            await safe_send_markdown(message, f"✅ Анонс плана опубликован в {CONTENT_CHANNEL}")
+        else:
+            await safe_send_markdown(message, "❌ Не удалось опубликовать. Проверь логи.")
         return
 
     # 1) мастер отчёта
@@ -452,11 +483,65 @@ async def start_web_server():
     await site.start()
 
 
+def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
+    """
+    Настраивает планировщик задач для контент-завода.
+    - Ежедневно в POST_HOUR_UTC:POST_MINUTE_UTC UTC публикует пост
+    - 1-го числа каждого месяца публикует анонс контент-плана
+    """
+    scheduler = AsyncIOScheduler(timezone="UTC")
+
+    # Ежедневный пост
+    scheduler.add_job(
+        publish_daily_post,
+        trigger=CronTrigger(hour=POST_HOUR_UTC, minute=POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="daily_post",
+        name="Daily fishing post to channel",
+        replace_existing=True,
+        misfire_grace_time=3600,  # если пропустил — публикует в течение часа
+    )
+
+    # Анонс контент-плана 1-го числа каждого месяца (на час раньше обычного поста)
+    plan_hour = max(0, POST_HOUR_UTC - 1)
+    scheduler.add_job(
+        publish_monthly_plan_preview,
+        trigger=CronTrigger(day=1, hour=plan_hour, minute=POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="monthly_plan",
+        name="Monthly content plan preview",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    logging.info(
+        "Scheduler configured: daily post at %02d:%02d UTC, monthly plan on 1st at %02d:%02d UTC",
+        POST_HOUR_UTC, POST_MINUTE_UTC, plan_hour, POST_MINUTE_UTC
+    )
+    return scheduler
+
+
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # Запускаем веб-сервер (для Render healthcheck)
     asyncio.create_task(start_web_server())
-    await dp.start_polling(bot)
+
+    # Запускаем планировщик контент-завода
+    scheduler = setup_scheduler(bot)
+    scheduler.start()
+    logging.info(
+        "Content factory started. Channel: %s, Post time: %02d:%02d UTC (%02d:%02d MSK)",
+        CONTENT_CHANNEL,
+        POST_HOUR_UTC, POST_MINUTE_UTC,
+        (POST_HOUR_UTC + 3) % 24, POST_MINUTE_UTC
+    )
+
+    try:
+        await dp.start_polling(bot)
+    finally:
+        scheduler.shutdown()
 
 
 if __name__ == "__main__":
@@ -465,10 +550,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-
-
-
-
-
-
-
