@@ -473,6 +473,41 @@ async def handle_text(message: Message):
     await safe_send_markdown(message, ans)
 
 
+def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
+    """
+    Планировщик контент-завода:
+    - ежедневно в POST_HOUR_UTC:POST_MINUTE_UTC UTC публикует пост
+    - 1-го числа каждого месяца публикует анонс контент-плана
+    """
+    scheduler = AsyncIOScheduler(timezone="UTC")
+
+    scheduler.add_job(
+        publish_daily_post,
+        trigger=CronTrigger(hour=POST_HOUR_UTC, minute=POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="daily_post",
+        name="Daily fishing post to channel",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    plan_hour = max(0, POST_HOUR_UTC - 1)
+    scheduler.add_job(
+        publish_monthly_plan_preview,
+        trigger=CronTrigger(day=1, hour=plan_hour, minute=POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="monthly_plan",
+        name="Monthly content plan preview",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    logging.info(
+        "Scheduler configured: daily post at %02d:%02d UTC, monthly plan on 1st at %02d:%02d UTC",
+        POST_HOUR_UTC, POST_MINUTE_UTC, plan_hour, POST_MINUTE_UTC
+    )
+    return scheduler
+
 
 
 async def on_startup(bot: Bot):
