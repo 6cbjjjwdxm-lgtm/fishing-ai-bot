@@ -452,6 +452,24 @@ MONTHLY_TOPICS = {
     ],
 }
 
+# ────────────────────────────── Утилиты текста ──────────────────────────────
+
+TG_CAPTION_LIMIT = 1024  # жёсткий лимит Telegram для подписи к фото
+
+
+def _trim_caption(text: str, limit: int = TG_CAPTION_LIMIT - 10) -> str:
+    """Обрезает текст до лимита по последнему пробелу."""
+    if len(text) <= limit:
+        return text
+    trimmed = text[:limit].rsplit(' ', 1)[0].rstrip('.,;:-')
+    return trimmed + "..."
+
+
+def _strip_markdown(text: str) -> str:
+    """Убирает Markdown-символы — caption без parse_mode не поддерживает их."""
+    return text.replace('**', '').replace('*', '').replace('__', '').replace('_', '').replace('`', '')
+
+
 # ────────────────────────────── Unsplash ──────────────────────────────
 
 async def get_photo_url(query: str) -> Optional[str]:
@@ -623,11 +641,7 @@ async def generate_post_text(
             max_tokens=400,
         )
         text = resp.choices[0].message.content.strip()
-        # Жёсткое ограничение: caption Telegram <= 1024 символов
-        if len(text) > 1000:
-            # Обрезаем по последнему пробелу до лимита, добавляем хэштеги
-            text = text[:950].rsplit(' ', 1)[0].rstrip('.,') + "..."
-        return text
+        return _trim_caption(text)
     except Exception as e:
         logger.error("Failed to generate post text: %s", e)
         return f"🎣 {topic}\n\nПодробности скоро!\n\n#рыбалка #подмосковье #рыбалкамосква"
@@ -675,49 +689,25 @@ async def publish_daily_post(bot, client: AsyncOpenAI) -> bool:
     img_query = _make_image_search_query(topic, month)
     photo_url = await get_photo_url(img_query)
 
-    # Финальная защита: caption не может быть длиннее 1024 символов
-    if len(text) > 1000:
-        text = text[:950].rsplit(' ', 1)[0].rstrip('.,') + "..."
-
-    # Публикуем в канал
+    # Публикуем в канал (без Markdown в caption — надёжнее всего)
+    safe_text = _trim_caption(_strip_markdown(text))
     try:
         if photo_url:
             await bot.send_photo(
                 chat_id=CONTENT_CHANNEL,
                 photo=photo_url,
-                caption=text,
-                parse_mode="Markdown",
+                caption=safe_text,
             )
         else:
             await bot.send_message(
                 chat_id=CONTENT_CHANNEL,
-                text=text,
-                parse_mode="Markdown",
+                text=safe_text,
             )
         logger.info("Successfully published post: %s", topic[:50])
         return True
     except Exception as e:
         logger.error("Failed to publish post to %s: %s", CONTENT_CHANNEL, e)
-        # Пробуем без Markdown если ошибка форматирования
-        try:
-            # Убираем Markdown-символы для безопасной отправки
-            safe_text = text.replace('*', '').replace('_', '').replace('`', '')
-            if photo_url:
-                await bot.send_photo(
-                    chat_id=CONTENT_CHANNEL,
-                    photo=photo_url,
-                    caption=safe_text,
-                )
-            else:
-                await bot.send_message(
-                    chat_id=CONTENT_CHANNEL,
-                    text=safe_text,
-                )
-            logger.info("Published without Markdown: %s", topic[:50])
-            return True
-        except Exception as e2:
-            logger.error("Retry also failed: %s", e2)
-            return False
+        return False
 
 
 async def publish_monthly_plan_preview(bot, client: AsyncOpenAI) -> bool:

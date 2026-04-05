@@ -524,12 +524,16 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
 
-    # Сбрасываем webhook и ждём — это убивает предыдущий polling-сеанс на серверах Telegram
-    await bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(2)
-
-    # Запускаем веб-сервер (для Render healthcheck)
+    # Запускаем веб-сервер сразу — Render ждёт ответа на порте до завершения deploy
     asyncio.create_task(start_web_server())
+
+    # Даём время предыдущему инстансу полностью завершить работу
+    logging.info("Waiting 15s for previous instance to shut down...")
+    await asyncio.sleep(15)
+
+    # Сбрасываем webhook и повторно ждём
+    await bot.delete_webhook(drop_pending_updates=True)
+    await asyncio.sleep(3)
 
     # Запускаем планировщик контент-завода
     scheduler = setup_scheduler(bot)
