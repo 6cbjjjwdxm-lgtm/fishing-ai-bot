@@ -574,7 +574,7 @@ POST_SYSTEM = """
 
 Правила:
 - Пиши на русском языке
-- Текст поста: 150–300 слов (не больше)
+- Текст поста: строго не длиннее 900 символов (включая хэштеги и эмодзи). Это жёсткое ограничение!
 - Обязательно упоминай Московский регион, конкретные водоёмы или условия
 - Добавляй практические советы, которые реально полезны
 - Заканчивай призывом к действию или вопросом для подписчиков
@@ -620,9 +620,14 @@ async def generate_post_text(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.75,
-            max_tokens=600,
+            max_tokens=400,
         )
-        return resp.choices[0].message.content.strip()
+        text = resp.choices[0].message.content.strip()
+        # Жёсткое ограничение: caption Telegram <= 1024 символов
+        if len(text) > 1000:
+            # Обрезаем по последнему пробелу до лимита, добавляем хэштеги
+            text = text[:950].rsplit(' ', 1)[0].rstrip('.,') + "..."
+        return text
     except Exception as e:
         logger.error("Failed to generate post text: %s", e)
         return f"🎣 {topic}\n\nПодробности скоро!\n\n#рыбалка #подмосковье #рыбалкамосква"
@@ -670,6 +675,10 @@ async def publish_daily_post(bot, client: AsyncOpenAI) -> bool:
     img_query = _make_image_search_query(topic, month)
     photo_url = await get_photo_url(img_query)
 
+    # Финальная защита: caption не может быть длиннее 1024 символов
+    if len(text) > 1000:
+        text = text[:950].rsplit(' ', 1)[0].rstrip('.,') + "..."
+
     # Публикуем в канал
     try:
         if photo_url:
@@ -691,17 +700,20 @@ async def publish_daily_post(bot, client: AsyncOpenAI) -> bool:
         logger.error("Failed to publish post to %s: %s", CONTENT_CHANNEL, e)
         # Пробуем без Markdown если ошибка форматирования
         try:
+            # Убираем Markdown-символы для безопасной отправки
+            safe_text = text.replace('*', '').replace('_', '').replace('`', '')
             if photo_url:
                 await bot.send_photo(
                     chat_id=CONTENT_CHANNEL,
                     photo=photo_url,
-                    caption=text,
+                    caption=safe_text,
                 )
             else:
                 await bot.send_message(
                     chat_id=CONTENT_CHANNEL,
-                    text=text,
+                    text=safe_text,
                 )
+            logger.info("Published without Markdown: %s", topic[:50])
             return True
         except Exception as e2:
             logger.error("Retry also failed: %s", e2)
