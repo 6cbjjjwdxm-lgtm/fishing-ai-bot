@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from openai import AsyncOpenAI
 
@@ -130,6 +130,52 @@ async def subscription_gate(message: Message) -> bool:
     return True
 
 
+# ────────────────────────────── Меню кнопок ──────────────────────────────
+
+def admin_menu_keyboard() -> InlineKeyboardMarkup:
+    """Главное меню админ-команд."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        # Заголовок: @dnevnikrib
+        [InlineKeyboardButton(text="📝 Пост @dnevnikrib", callback_data="cmd:post_now"),
+         InlineKeyboardButton(text="🔥 Вирал @dnevnikrib", callback_data="cmd:viral_now")],
+        [InlineKeyboardButton(text="📅 План @dnevnikrib", callback_data="cmd:plan_now"),
+         InlineKeyboardButton(text="📣 PR @dnevnikrib", callback_data="cmd:pr")],
+        # Заголовок: @zajabri
+        [InlineKeyboardButton(text="━━━ @zajabri ━━━", callback_data="cmd:noop")],
+        [InlineKeyboardButton(text="🎯 Пост @zajabri", callback_data="cmd:zajabri_post"),
+         InlineKeyboardButton(text="🔥 Вирал @zajabri", callback_data="cmd:zajabri_viral")],
+        [InlineKeyboardButton(text="📅 План @zajabri", callback_data="cmd:zajabri_plan"),
+         InlineKeyboardButton(text="📣 PR @zajabri", callback_data="cmd:zajabri_pr")],
+        # Соцсети
+        [InlineKeyboardButton(text="━━━ Соцсети ━━━", callback_data="cmd:noop")],
+        [InlineKeyboardButton(text="📱 Threads + IG посты", callback_data="cmd:social_now"),
+         InlineKeyboardButton(text="🎬 Reels подпись", callback_data="cmd:reels")],
+        # Система
+        [InlineKeyboardButton(text="━━━ Система ━━━", callback_data="cmd:noop")],
+        [InlineKeyboardButton(text="🔐 Статус токенов", callback_data="cmd:token_status"),
+         InlineKeyboardButton(text="🔄 Обновить токены", callback_data="cmd:token_refresh")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="cmd:stats")],
+    ])
+
+
+# Маппинг callback_data -> текст команды (cимулируем *команду)
+CMD_MAP = {
+    "post_now": "*post_now",
+    "viral_now": "*viral_now",
+    "plan_now": "*plan_now",
+    "pr": "*pr",
+    "zajabri_post": "*zajabri_post",
+    "zajabri_viral": "*zajabri_viral",
+    "zajabri_plan": "*zajabri_plan",
+    "zajabri_pr": "*zajabri_pr",
+    "social_now": "*social_now",
+    "reels": "*reels",
+    "token_status": "*token_status",
+    "token_refresh": "*token_refresh",
+    "stats": "*stats",
+}
+
+
 def _pending_set(uid: int, query: str, day_offset: int):
     PENDING_FORECAST[uid] = {"query": query, "day_offset": int(day_offset)}
 
@@ -149,12 +195,55 @@ async def cmd_start(message: Message):
         await safe_send_markdown(message, "🧾 Заполняем отчёт.\n" + prompt)
         return
 
+    uid = message.from_user.id
+    if ADMIN_IDS and uid in ADMIN_IDS:
+        await message.answer(
+            "👋 Привет, админ!\n\n"
+            "Управляй каналами через кнопки ниже\n"
+            "или напиши `*menu` чтобы вызвать меню снова.",
+            reply_markup=admin_menu_keyboard(),
+        )
+        return
+
     await message.answer(
         "👋 Привет! Я рыболовный AI‑ассистент.\n\n"
         "Я отвечаю только на сообщения со звёздочкой `*`.\n"
         "Пример: `*клев завтра в Москве`.\n\n"
         "Отчёт: кнопка в закрепе канала или /start report."
     )
+
+
+# ────────────────────────────── Callback: кнопки меню ──────────────────────────────
+
+@dp.callback_query(F.data.startswith("cmd:"))
+async def handle_cmd_callback(callback: CallbackQuery):
+    """Обработка нажатий inline-кнопок админ-меню."""
+    uid = callback.from_user.id
+    if ADMIN_IDS and uid not in ADMIN_IDS:
+        await callback.answer("⛔ Только для админов", show_alert=True)
+        return
+
+    key = callback.data[4:]  # убираем "cmd:"
+
+    # Разделители — просто подтверждаем нажатие без действия
+    if key == "noop":
+        await callback.answer()
+        return
+
+    cmd_text = CMD_MAP.get(key)
+    if not cmd_text:
+        await callback.answer("Неизвестная команда", show_alert=True)
+        return
+
+    await callback.answer(f"⏳ {cmd_text}")
+
+    # Создаём «фейковое» сообщение — переиспользуем callback.message,
+    # подменяя текст и from_user, чтобы handle_text обработал команду
+    fake = callback.message
+    # Для callback.message from_user — это бот; подменяем на реального юзера
+    fake.__dict__["from_user"] = callback.from_user
+    fake.__dict__["text"] = cmd_text
+    await handle_text(fake)
 
 
 @dp.callback_query(RepCB.filter())
@@ -345,6 +434,11 @@ async def handle_text(message: Message):
     # 0) админ-команда для закрепа (если используешь)
     if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*pin":
         await safe_send_markdown(message, "Команда *pin включена, но функция pin не вставлена в этот main.py.")
+        return
+
+    # 0-menu) Admin: показать меню с кнопками
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*menu":
+        await message.answer("📋 Меню команд:", reply_markup=admin_menu_keyboard())
         return
 
     # 0b) Admin: принудительная публикация поста (для теста)
