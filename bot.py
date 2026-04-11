@@ -417,13 +417,9 @@ async def handle_text(message: Message):
     # 0i) Admin: связка Threads + Instagram + TG
     if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*social_now":
         bot_inst = message.bot
-        await safe_send_markdown(message, "⏳ Запускаю социальную связку (Threads + Instagram)...")
-        results = await publish_social_bundle(bot_inst, client)
-        status_lines = []
-        for platform, ok in results.items():
-            emoji = "✅" if ok else "❌"
-            status_lines.append(f"{emoji} {platform}")
-        await message.answer("Результаты публикации:\n" + "\n".join(status_lines))
+        await safe_send_markdown(message, "⏳ Генерирую посты для соцсетей...")
+        results = await publish_social_bundle(bot_inst, client, admin_ids=ADMIN_IDS)
+        await message.answer("✅ Готовые тексты отправлены выше ↑")
         return
 
     # 0j) Admin: PR-тексты для @zajabri
@@ -677,8 +673,9 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         publish_social_bundle,
         trigger=CronTrigger(hour=SOCIAL_POST_HOUR_UTC, minute=SOCIAL_POST_MINUTE_UTC, timezone="UTC"),
         args=[bot, client],
+        kwargs={"admin_ids": ADMIN_IDS},
         id="social_bundle",
-        name="Daily Threads + Instagram bundle",
+        name="Daily social bundle to admin DM",
         replace_existing=True,
         misfire_grace_time=3600,
     )

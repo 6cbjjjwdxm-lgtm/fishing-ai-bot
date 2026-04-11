@@ -1022,10 +1022,11 @@ async def publish_zajabri_daily(bot, client: AsyncOpenAI) -> bool:
         return False
 
 
-async def publish_social_bundle(bot, client: AsyncOpenAI) -> Dict[str, bool]:
+async def publish_social_bundle(bot, client: AsyncOpenAI, admin_ids: list = None) -> Dict[str, bool]:
     """
-    Связка: одна тема → Threads пост + Instagram Reel + ТГ полный разбор.
-    Публикуется вечером для максимального охвата.
+    Связка: одна тема → готовые тексты для Threads + Instagram.
+    Бот генерирует контент и присылает админу в личку для ручной публикации.
+    Публикуется вечером (18:00 МСК).
     
     Возвращает статусы: {"threads_zajabri": bool, "threads_dnevnikrib": bool, "instagram": bool}
     """
@@ -1046,32 +1047,67 @@ async def publish_social_bundle(bot, client: AsyncOpenAI) -> Dict[str, bool]:
     topic_idx = (day + 2) % len(topics)
     topic = topics[topic_idx]
 
-    # Параллельная генерация всего контента
+    # Определяем кому слать
+    if not admin_ids:
+        import os as _os
+        admin_ids = [int(x) for x in (_os.getenv("ADMIN_IDS") or "").split(",") if x.strip().isdigit()]
+    if not admin_ids:
+        logger.warning("No admin_ids — cannot send social bundle to DM")
+        return results
+
+    # Параллельная генерация контента
     threads_zajabri_task = generate_threads_post(client, topic, month, "@zajabri", "Заядлые рыбаки")
     threads_dnevnikrib_task = generate_threads_post(client, topic, month, "@dnevnikrib", "Дневник рыбака")
     reels_caption_task = generate_reels_caption(client, topic, month)
-    video_query = _make_video_search_query(topic, month)
-    video_task = search_pexels_video(video_query)
     photo_query = _make_photo_search_query(topic, month)
     photo_task = search_pexels_photo(photo_query)
 
-    threads_zajabri_text, threads_dnevnikrib_text, reels_caption, video_url, photo_url = await asyncio.gather(
-        threads_zajabri_task, threads_dnevnikrib_task, reels_caption_task, video_task, photo_task
+    threads_zajabri_text, threads_dnevnikrib_text, reels_caption, photo_url = await asyncio.gather(
+        threads_zajabri_task, threads_dnevnikrib_task, reels_caption_task, photo_task
     )
 
-    # 1. Threads для @zajabri
+    # Собираем сообщение для админа
+    parts = []
+    parts.append("📱 Готовые посты для соцсетей\n")
+    parts.append(f"Тема: {topic}\n")
+
     if threads_zajabri_text:
-        results["threads_zajabri"] = await publish_to_threads(threads_zajabri_text, photo_url)
-        await asyncio.sleep(3)  # пауза между запросами
+        parts.append("━━━━━━━━━━━━━━━━━━━━")
+        parts.append("📌 THREADS — @zajabri")
+        parts.append("(скопируй и опубликуй в Threads)")
+        parts.append("━━━━━━━━━━━━━━━━━━━━")
+        parts.append(threads_zajabri_text)
+        results["threads_zajabri"] = True
 
-    # 2. Threads для @dnevnikrib
     if threads_dnevnikrib_text:
-        results["threads_dnevnikrib"] = await publish_to_threads(threads_dnevnikrib_text, photo_url)
-        await asyncio.sleep(3)
+        parts.append("\n━━━━━━━━━━━━━━━━━━━━")
+        parts.append("📌 THREADS — @dnevnikrib")
+        parts.append("(скопируй и опубликуй в Threads)")
+        parts.append("━━━━━━━━━━━━━━━━━━━━")
+        parts.append(threads_dnevnikrib_text)
+        results["threads_dnevnikrib"] = True
 
-    # 3. Instagram Reel
-    if video_url and reels_caption:
-        results["instagram"] = await publish_reel_to_instagram(video_url, reels_caption)
+    if reels_caption:
+        parts.append("\n━━━━━━━━━━━━━━━━━━━━")
+        parts.append("🎬 INSTAGRAM — подпись к Reels")
+        parts.append("(запиши видео, добавь эту подпись)")
+        parts.append("━━━━━━━━━━━━━━━━━━━━")
+        parts.append(reels_caption)
+        results["instagram"] = True
+
+    if photo_url:
+        parts.append(f"\n🖼 Фото для поста: {photo_url}")
+
+    full_text = "\n".join(parts)
+
+    # Шлём админу в личку
+    for aid in admin_ids:
+        try:
+            # Разбиваем на чанки по 4000 символов
+            for i in range(0, len(full_text), 4000):
+                await bot.send_message(chat_id=aid, text=full_text[i:i + 4000])
+        except Exception as e:
+            logger.warning("Failed to send social bundle to admin %s: %s", aid, e)
 
     # Записываем в персистентную историю
     record_social_post(
@@ -1080,10 +1116,7 @@ async def publish_social_bundle(bot, client: AsyncOpenAI) -> Dict[str, bool]:
         ig_ok=results["instagram"],
     )
 
-    logger.info(
-        "Social bundle published: threads_zajabri=%s, threads_dnevnikrib=%s, instagram=%s",
-        results["threads_zajabri"], results["threads_dnevnikrib"], results["instagram"]
-    )
+    logger.info("Social bundle sent to admins: %s", results)
     return results
 
 
