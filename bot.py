@@ -42,6 +42,18 @@ from content_factory import (
     POST_MINUTE_UTC,
     CONTENT_CHANNEL,
 )
+from zajabri_content import (
+    publish_zajabri_daily,
+    publish_zajabri_viral,
+    publish_zajabri_monthly_plan,
+    publish_social_bundle,
+    generate_zajabri_pr_texts,
+    ZAJABRI_CHANNEL,
+    ZAJABRI_POST_HOUR_UTC,
+    ZAJABRI_POST_MINUTE_UTC,
+    SOCIAL_POST_HOUR_UTC,
+    SOCIAL_POST_MINUTE_UTC,
+)
 
 load_dotenv()
 
@@ -365,6 +377,65 @@ async def handle_text(message: Message):
             await safe_send_markdown(message, "❌ Не удалось опубликовать.")
         return
 
+    # ── ZAJABRI ADMIN COMMANDS ──
+
+    # 0f) Admin: публикация поста в @zajabri
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*zajabri_post":
+        bot_inst = message.bot
+        await safe_send_markdown(message, "⏳ Публикую пост в @zajabri...")
+        ok = await publish_zajabri_daily(bot_inst, client)
+        if ok:
+            await safe_send_markdown(message, f"✅ Пост опубликован в {ZAJABRI_CHANNEL}")
+        else:
+            await safe_send_markdown(message, "❌ Не удалось опубликовать.")
+        return
+
+    # 0g) Admin: виральный пост в @zajabri
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*zajabri_viral":
+        bot_inst = message.bot
+        await safe_send_markdown(message, "⏳ Генерирую виральный пост для @zajabri...")
+        ok = await publish_zajabri_viral(bot_inst, client)
+        if ok:
+            await safe_send_markdown(message, f"✅ Виральный пост опубликован в {ZAJABRI_CHANNEL}")
+        else:
+            await safe_send_markdown(message, "❌ Не удалось опубликовать.")
+        return
+
+    # 0h) Admin: план месяца @zajabri
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*zajabri_plan":
+        bot_inst = message.bot
+        await safe_send_markdown(message, "⏳ Публикую план @zajabri...")
+        ok = await publish_zajabri_monthly_plan(bot_inst, client)
+        if ok:
+            await safe_send_markdown(message, f"✅ План опубликован в {ZAJABRI_CHANNEL}")
+        else:
+            await safe_send_markdown(message, "❌ Не удалось опубликовать.")
+        return
+
+    # 0i) Admin: связка Threads + Instagram + TG
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*social_now":
+        bot_inst = message.bot
+        await safe_send_markdown(message, "⏳ Запускаю социальную связку (Threads + Instagram)...")
+        results = await publish_social_bundle(bot_inst, client)
+        status_lines = []
+        for platform, ok in results.items():
+            emoji = "✅" if ok else "❌"
+            status_lines.append(f"{emoji} {platform}")
+        await message.answer("Результаты публикации:\n" + "\n".join(status_lines))
+        return
+
+    # 0j) Admin: PR-тексты для @zajabri
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*zajabri_pr":
+        await safe_send_markdown(message, "⏳ Генерирую PR-тексты для @zajabri...")
+        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+        pr_text = await generate_zajabri_pr_texts(client, now.month)
+        header = "📲 Тексты для продвижения @zajabri:\n\n"
+        full_text = header + pr_text
+        chunk_size = 4000
+        for i in range(0, len(full_text), chunk_size):
+            await message.answer(full_text[i:i + chunk_size])
+        return
+
     # 0e) Admin: генерация PR-текстов для размещения в чатах
     if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*pr":
         await safe_send_markdown(message, "⏳ Генерирую тексты для продвижения...")
@@ -504,17 +575,20 @@ async def handle_text(message: Message):
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     """
     Планировщик контент-завода:
-    - ежедневно в POST_HOUR_UTC:POST_MINUTE_UTC UTC публикует пост
-    - 1-го числа каждого месяца публикует анонс контент-плана
+    - @dnevnikrib: ежедневно, виральный по воскресеньям, план 1-го числа
+    - @zajabri: ежедневно, виральный по воскресеньям, план 1-го числа
+    - Связка Threads+Instagram: ежедневно вечером
     """
     scheduler = AsyncIOScheduler(timezone="UTC")
+
+    # ── @DNEVNIKRIB ──
 
     scheduler.add_job(
         publish_daily_post,
         trigger=CronTrigger(hour=POST_HOUR_UTC, minute=POST_MINUTE_UTC, timezone="UTC"),
         args=[bot, client],
         id="daily_post",
-        name="Daily fishing post to channel",
+        name="Daily fishing post to @dnevnikrib",
         replace_existing=True,
         misfire_grace_time=3600,
     )
@@ -525,26 +599,76 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         trigger=CronTrigger(day=1, hour=plan_hour, minute=POST_MINUTE_UTC, timezone="UTC"),
         args=[bot, client],
         id="monthly_plan",
-        name="Monthly content plan preview",
+        name="Monthly plan @dnevnikrib",
         replace_existing=True,
         misfire_grace_time=3600,
     )
 
-    # Виральный пост по воскресеньям в 12:00 МСК (09:00 UTC)
     viral_hour = min(23, POST_HOUR_UTC + 2)
     scheduler.add_job(
         publish_viral_post,
         trigger=CronTrigger(day_of_week="sun", hour=viral_hour, minute=POST_MINUTE_UTC, timezone="UTC"),
         args=[bot, client],
         id="viral_post",
-        name="Weekly viral post (Sunday)",
+        name="Weekly viral @dnevnikrib (Sunday)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # ── @ZAJABRI ──
+
+    scheduler.add_job(
+        publish_zajabri_daily,
+        trigger=CronTrigger(hour=ZAJABRI_POST_HOUR_UTC, minute=ZAJABRI_POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="zajabri_daily",
+        name="Daily expert post to @zajabri",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    zajabri_plan_hour = max(0, ZAJABRI_POST_HOUR_UTC - 1)
+    scheduler.add_job(
+        publish_zajabri_monthly_plan,
+        trigger=CronTrigger(day=1, hour=zajabri_plan_hour, minute=ZAJABRI_POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="zajabri_monthly_plan",
+        name="Monthly plan @zajabri",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    zajabri_viral_hour = min(23, ZAJABRI_POST_HOUR_UTC + 3)
+    scheduler.add_job(
+        publish_zajabri_viral,
+        trigger=CronTrigger(day_of_week="sun", hour=zajabri_viral_hour, minute=ZAJABRI_POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="zajabri_viral",
+        name="Weekly viral @zajabri (Sunday)",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # ── THREADS + INSTAGRAM BUNDLE ──
+
+    scheduler.add_job(
+        publish_social_bundle,
+        trigger=CronTrigger(hour=SOCIAL_POST_HOUR_UTC, minute=SOCIAL_POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="social_bundle",
+        name="Daily Threads + Instagram bundle",
         replace_existing=True,
         misfire_grace_time=3600,
     )
 
     logging.info(
-        "Scheduler configured: daily post at %02d:%02d UTC, monthly plan on 1st at %02d:%02d UTC",
-        POST_HOUR_UTC, POST_MINUTE_UTC, plan_hour, POST_MINUTE_UTC
+        "Scheduler configured:\n"
+        "  @dnevnikrib: daily %02d:%02d UTC, viral Sun %02d:%02d UTC\n"
+        "  @zajabri: daily %02d:%02d UTC, viral Sun %02d:%02d UTC\n"
+        "  Social bundle: daily %02d:%02d UTC",
+        POST_HOUR_UTC, POST_MINUTE_UTC, viral_hour, POST_MINUTE_UTC,
+        ZAJABRI_POST_HOUR_UTC, ZAJABRI_POST_MINUTE_UTC, zajabri_viral_hour, ZAJABRI_POST_MINUTE_UTC,
+        SOCIAL_POST_HOUR_UTC, SOCIAL_POST_MINUTE_UTC,
     )
     return scheduler
 
