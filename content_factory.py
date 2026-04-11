@@ -19,6 +19,12 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 from openai import AsyncOpenAI
 
+from persistence import (
+    record_published,
+    was_published_today,
+    get_topic_for_today,
+)
+
 logger = logging.getLogger(__name__)
 
 # ────────────────────────────── Константы ──────────────────────────────
@@ -725,6 +731,11 @@ async def publish_daily_post(bot, client: AsyncOpenAI) -> bool:
     Основная функция: генерирует и публикует пост на сегодня.
     Вызывается планировщиком каждый день в заданное время.
     """
+    # Проверяем, не был ли уже пост сегодня (защита от дублей при рестарте)
+    if was_published_today(CONTENT_CHANNEL, "daily"):
+        logger.info("Daily post for %s already published today, skipping", CONTENT_CHANNEL)
+        return True
+
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)  # МСК
     today = now.date()
     month = today.month
@@ -733,15 +744,13 @@ async def publish_daily_post(bot, client: AsyncOpenAI) -> bool:
 
     logger.info("Publishing daily post for %s", today)
 
-    # Получаем тему на сегодня
+    # Получаем тему на сегодня из персистентного плана
     topics = MONTHLY_TOPICS.get(month, [])
     if not topics:
         logger.warning("No topics for month %d", month)
         return False
 
-    # Выбираем тему по дню месяца (с оборотом)
-    topic_idx = (day - 1) % len(topics)
-    topic = topics[topic_idx]
+    topic = get_topic_for_today(CONTENT_CHANNEL, month, year, day, topics)
 
     season = get_season(month)
     ice_status = get_ice_status(month)
@@ -774,6 +783,7 @@ async def publish_daily_post(bot, client: AsyncOpenAI) -> bool:
                 chat_id=CONTENT_CHANNEL,
                 text=safe_text,
             )
+        record_published(CONTENT_CHANNEL, topic, "daily")
         logger.info("Successfully published post: %s", topic[:50])
         return True
     except Exception as e:
@@ -828,6 +838,7 @@ async def publish_monthly_plan_preview(bot, client: AsyncOpenAI) -> bool:
                 text=text,
                 parse_mode="Markdown",
             )
+        record_published(CONTENT_CHANNEL, f"plan_{now.month}_{now.year}", "plan")
         return True
     except Exception as e:
         logger.error("Failed to publish monthly plan: %s", e)
@@ -907,6 +918,7 @@ async def publish_viral_post(bot, client: AsyncOpenAI) -> bool:
             await bot.send_photo(chat_id=CONTENT_CHANNEL, photo=photo_url, caption=text)
         else:
             await bot.send_message(chat_id=CONTENT_CHANNEL, text=text)
+        record_published(CONTENT_CHANNEL, f"viral_{fmt}", "viral")
         logger.info("Viral post published (format=%s)", fmt)
         return True
     except Exception as e:

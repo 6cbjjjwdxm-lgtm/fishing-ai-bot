@@ -23,6 +23,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiohttp
 from openai import AsyncOpenAI
 
+from persistence import (
+    record_published,
+    was_published_today,
+    get_topic_for_today,
+    record_social_post,
+    was_social_posted_today,
+)
+from token_manager import get_active_threads_token, get_active_ig_token
+
 logger = logging.getLogger(__name__)
 
 # ────────────────────────────── Константы ──────────────────────────────
@@ -31,11 +40,12 @@ ZAJABRI_CHANNEL = (os.getenv("ZAJABRI_CHANNEL") or "@zajabri").strip()
 
 # Threads API
 THREADS_USER_ID = (os.getenv("THREADS_USER_ID") or "").strip()
-THREADS_ACCESS_TOKEN = (os.getenv("THREADS_ACCESS_TOKEN") or "").strip()
+# Токен берём через token_manager (автообновление каждые 50 дней)
+# THREADS_ACCESS_TOKEN теперь не читается напрямую из env
 
 # Instagram Graph API
 IG_USER_ID = (os.getenv("IG_USER_ID") or "").strip()
-IG_ACCESS_TOKEN = (os.getenv("IG_ACCESS_TOKEN") or "").strip()
+# IG_ACCESS_TOKEN теперь не читается напрямую из env
 
 # Pexels для видео (шортсы)
 PEXELS_API_KEY = (os.getenv("PEXELS_API_KEY") or "").strip()
@@ -836,7 +846,8 @@ async def generate_reels_caption(
 
 async def publish_to_threads(text: str, image_url: Optional[str] = None) -> bool:
     """Публикует пост в Threads через Meta Graph API."""
-    if not THREADS_USER_ID or not THREADS_ACCESS_TOKEN:
+    threads_token = get_active_threads_token()
+    if not THREADS_USER_ID or not threads_token:
         logger.warning("Threads API credentials not set — skipping publish")
         return False
 
@@ -847,7 +858,7 @@ async def publish_to_threads(text: str, image_url: Optional[str] = None) -> bool
             create_url = f"https://graph.threads.net/{THREADS_USER_ID}/threads"
             payload = {
                 "text": text,
-                "access_token": THREADS_ACCESS_TOKEN,
+                "access_token": threads_token,
             }
             if image_url:
                 payload["media_type"] = "IMAGE"
@@ -873,7 +884,7 @@ async def publish_to_threads(text: str, image_url: Optional[str] = None) -> bool
             publish_url = f"https://graph.threads.net/{THREADS_USER_ID}/threads_publish"
             pub_payload = {
                 "creation_id": container_id,
-                "access_token": THREADS_ACCESS_TOKEN,
+                "access_token": threads_token,
             }
             async with session.post(publish_url, data=pub_payload) as resp:
                 if resp.status != 200:
@@ -892,7 +903,8 @@ async def publish_to_threads(text: str, image_url: Optional[str] = None) -> bool
 
 async def publish_reel_to_instagram(video_url: str, caption: str) -> bool:
     """Публикует Reel в Instagram через Graph API."""
-    if not IG_USER_ID or not IG_ACCESS_TOKEN:
+    ig_token = get_active_ig_token()
+    if not IG_USER_ID or not ig_token:
         logger.warning("Instagram API credentials not set — skipping reel publish")
         return False
 
@@ -906,7 +918,7 @@ async def publish_reel_to_instagram(video_url: str, caption: str) -> bool:
                 "video_url": video_url,
                 "caption": caption,
                 "share_to_feed": "true",
-                "access_token": IG_ACCESS_TOKEN,
+                "access_token": ig_token,
             }
             async with session.post(create_url, data=payload) as resp:
                 if resp.status != 200:
@@ -923,7 +935,7 @@ async def publish_reel_to_instagram(video_url: str, caption: str) -> bool:
             for attempt in range(12):
                 await asyncio.sleep(10)
                 status_url = f"https://graph.facebook.com/v18.0/{container_id}"
-                params = {"fields": "status_code", "access_token": IG_ACCESS_TOKEN}
+                params = {"fields": "status_code", "access_token": ig_token}
                 async with session.get(status_url, params=params) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -938,7 +950,7 @@ async def publish_reel_to_instagram(video_url: str, caption: str) -> bool:
             publish_url = f"https://graph.facebook.com/v18.0/{IG_USER_ID}/media_publish"
             pub_payload = {
                 "creation_id": container_id,
-                "access_token": IG_ACCESS_TOKEN,
+                "access_token": ig_token,
             }
             async with session.post(publish_url, data=pub_payload) as resp:
                 if resp.status != 200:
@@ -958,12 +970,19 @@ async def publish_reel_to_instagram(video_url: str, caption: str) -> bool:
 async def publish_zajabri_daily(bot, client: AsyncOpenAI) -> bool:
     """
     Ежедневная публикация в @zajabri:
-    - Генерирует экспертный пост
-    - Публикует в ТГ-канал с фото
+    - Проверяет дубли (защита при рестарте)
+    - Берёт тему из персистентного плана
+    - Генерирует экспертный пост и публикует в ТГ-канал с фото
     """
+    # Защита от дублей при рестарте
+    if was_published_today(ZAJABRI_CHANNEL, "daily"):
+        logger.info("Zajabri daily post already published today, skipping")
+        return True
+
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     today = now.date()
     month = today.month
+    year = today.year
     day = today.day
 
     topics = ZAJABRI_TOPICS.get(month, [])
@@ -971,8 +990,8 @@ async def publish_zajabri_daily(bot, client: AsyncOpenAI) -> bool:
         logger.warning("No zajabri topics for month %d", month)
         return False
 
-    topic_idx = (day - 1) % len(topics)
-    topic = topics[topic_idx]
+    # Тема из персистентного плана (не меняется после рестарта)
+    topic = get_topic_for_today(ZAJABRI_CHANNEL, month, year, day, topics)
 
     # Генерируем экспертный пост
     text = await generate_zajabri_post(client, topic, month)
@@ -995,6 +1014,7 @@ async def publish_zajabri_daily(bot, client: AsyncOpenAI) -> bool:
                 chat_id=ZAJABRI_CHANNEL,
                 text=safe_text,
             )
+        record_published(ZAJABRI_CHANNEL, topic, "daily")
         logger.info("Zajabri daily post published: %s", topic[:50])
         return True
     except Exception as e:
@@ -1009,6 +1029,11 @@ async def publish_social_bundle(bot, client: AsyncOpenAI) -> Dict[str, bool]:
     
     Возвращает статусы: {"threads_zajabri": bool, "threads_dnevnikrib": bool, "instagram": bool}
     """
+    # Защита от дублей
+    if was_social_posted_today():
+        logger.info("Social bundle already posted today, skipping")
+        return {"threads_zajabri": True, "threads_dnevnikrib": True, "instagram": True}
+
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     month = now.month
     day = now.day
@@ -1048,6 +1073,13 @@ async def publish_social_bundle(bot, client: AsyncOpenAI) -> Dict[str, bool]:
     if video_url and reels_caption:
         results["instagram"] = await publish_reel_to_instagram(video_url, reels_caption)
 
+    # Записываем в персистентную историю
+    record_social_post(
+        topic,
+        threads_ok=results["threads_zajabri"] or results["threads_dnevnikrib"],
+        ig_ok=results["instagram"],
+    )
+
     logger.info(
         "Social bundle published: threads_zajabri=%s, threads_dnevnikrib=%s, instagram=%s",
         results["threads_zajabri"], results["threads_dnevnikrib"], results["instagram"]
@@ -1081,6 +1113,10 @@ VIRAL_HINTS = {
 
 async def publish_zajabri_viral(bot, client: AsyncOpenAI) -> bool:
     """Виральный пост для @zajabri (по воскресеньям)."""
+    if was_published_today(ZAJABRI_CHANNEL, "viral"):
+        logger.info("Zajabri viral post already published today, skipping")
+        return True
+
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
     month = now.month
     week_num = now.isocalendar()[1]
@@ -1117,6 +1153,7 @@ async def publish_zajabri_viral(bot, client: AsyncOpenAI) -> bool:
             await bot.send_photo(chat_id=ZAJABRI_CHANNEL, photo=photo_url, caption=text)
         else:
             await bot.send_message(chat_id=ZAJABRI_CHANNEL, text=text)
+        record_published(ZAJABRI_CHANNEL, f"viral_{fmt}", "viral")
         logger.info("Zajabri viral post published (format=%s)", fmt)
         return True
     except Exception as e:
@@ -1162,6 +1199,7 @@ async def publish_zajabri_monthly_plan(bot, client: AsyncOpenAI) -> bool:
             await bot.send_photo(chat_id=ZAJABRI_CHANNEL, photo=photo_url, caption=safe_text)
         else:
             await bot.send_message(chat_id=ZAJABRI_CHANNEL, text=safe_text)
+        record_published(ZAJABRI_CHANNEL, f"plan_{month}_{year}", "plan")
         logger.info("Zajabri monthly plan published for %s %d", month_name, year)
         return True
     except Exception as e:

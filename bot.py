@@ -54,6 +54,8 @@ from zajabri_content import (
     SOCIAL_POST_HOUR_UTC,
     SOCIAL_POST_MINUTE_UTC,
 )
+from token_manager import check_and_refresh_tokens, get_token_status
+from persistence import get_stats
 
 load_dotenv()
 
@@ -436,6 +438,26 @@ async def handle_text(message: Message):
             await message.answer(full_text[i:i + chunk_size])
         return
 
+    # 0k) Admin: статус Meta-токенов
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*token_status":
+        status = get_token_status()
+        await message.answer(status)
+        return
+
+    # 0l) Admin: статистика контент-завода
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*stats":
+        stats = get_stats()
+        await message.answer(stats)
+        return
+
+    # 0m) Admin: принудительная проверка/обновление токенов
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*token_refresh":
+        await safe_send_markdown(message, "⏳ Проверяю и обновляю токены...")
+        results = await check_and_refresh_tokens(bot=message.bot, admin_ids=ADMIN_IDS)
+        status_lines = [f"{k}: {v}" for k, v in results.items()]
+        await message.answer("🔐 Результат:\n" + "\n".join(status_lines))
+        return
+
     # 0e) Admin: генерация PR-текстов для размещения в чатах
     if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*pr":
         await safe_send_markdown(message, "⏳ Генерирую тексты для продвижения...")
@@ -661,6 +683,18 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         misfire_grace_time=3600,
     )
 
+    # ── META TOKEN AUTO-REFRESH (ежедневно в 03:00 UTC = 06:00 МСК) ──
+
+    scheduler.add_job(
+        check_and_refresh_tokens,
+        trigger=CronTrigger(hour=3, minute=0, timezone="UTC"),
+        kwargs={"bot": bot, "admin_ids": ADMIN_IDS},
+        id="token_refresh",
+        name="Daily Meta token check & refresh",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     logging.info(
         "Scheduler configured:\n"
         "  @dnevnikrib: daily %02d:%02d UTC, viral Sun %02d:%02d UTC\n"
@@ -686,6 +720,13 @@ async def on_startup(bot: Bot):
         allowed_updates=dp.resolve_used_update_types(),
     )
     logging.info("Webhook set: %s", webhook_url)
+
+    # Проверяем и обновляем Meta-токены при старте
+    try:
+        results = await check_and_refresh_tokens(bot=bot, admin_ids=ADMIN_IDS)
+        logging.info("Startup token check: %s", results)
+    except Exception as e:
+        logging.warning("Startup token check failed: %s", e)
 
 
 async def on_shutdown(bot: Bot):
