@@ -31,6 +31,7 @@ from persistence import (
     was_social_posted_today,
 )
 from token_manager import get_active_threads_token, get_active_ig_token
+from reels_templates import get_reels_system_prompt, build_reels_hashtags, get_random_hook, get_random_cta
 
 logger = logging.getLogger(__name__)
 
@@ -799,17 +800,7 @@ async def generate_threads_post(
 
 # ────────────────────────────── Instagram Reels подпись ──────────────────────────────
 
-REELS_CAPTION_SYSTEM = """
-Ты пишешь подписи к Instagram Reels о спиннинговой рыбалке в МО.
-
-ПРАВИЛА:
-1. ДЛИНА: до 300 символов
-2. Первая строка — хук (вопрос, факт, провокация)
-3. 1-2 строки полезного инсайта
-4. Призыв: "Полный разбор в Telegram — ссылка в шапке профиля"
-5. Хэштеги: 8-12 штук — микс из больших (#рыбалка #fishing) и нишевых (#спиннингмо #джигмосква)
-6. Эмодзи: 3-5
-""".strip()
+# REELS_CAPTION_SYSTEM теперь генерируется динамически через reels_templates.get_reels_system_prompt()
 
 
 async def generate_reels_caption(
@@ -817,29 +808,34 @@ async def generate_reels_caption(
     topic: str,
     month: int,
 ) -> str:
-    """Генерирует подпись для Instagram Reels."""
+    """Генерирует подпись для Instagram Reels с оптимизированными хэштегами."""
     season = get_season(month)
+    system_prompt = get_reels_system_prompt(month, topic)
 
     prompt = (
         f"Напиши подпись к Instagram Reels на тему: {topic}\n"
         f"Сезон: {season}\n"
-        f"Не забудь призыв перейти в Telegram (ссылка в шапке профиля)"
+        f"Вставь ВСЕ хэштеги из системного промпта в конец поста."
     )
 
     try:
         resp = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": REELS_CAPTION_SYSTEM},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.8,
-            max_tokens=200,
+            max_tokens=350,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
         logger.error("Failed to generate reels caption: %s", e)
-        return f"🎯 {topic}\n\nПолный разбор — ссылка в шапке 👆\n#спиннинг #рыбалка #fishing"
+        # Фоллбэк с оптимизированными хэштегами
+        hook = get_random_hook(month, topic)
+        cta = get_random_cta()
+        hashtags = build_reels_hashtags(month, topic, count=20)
+        return f"{hook}\n\n🎯 {topic}\n\n{cta}\n\n.\n.\n.\n{hashtags}"
 
 
 # ────────────────────────────── Threads API ──────────────────────────────

@@ -48,6 +48,7 @@ from zajabri_content import (
     publish_zajabri_monthly_plan,
     publish_social_bundle,
     generate_zajabri_pr_texts,
+    generate_reels_caption,
     ZAJABRI_CHANNEL,
     ZAJABRI_POST_HOUR_UTC,
     ZAJABRI_POST_MINUTE_UTC,
@@ -452,6 +453,29 @@ async def handle_text(message: Message):
         results = await check_and_refresh_tokens(bot=message.bot, admin_ids=ADMIN_IDS)
         status_lines = [f"{k}: {v}" for k, v in results.items()]
         await message.answer("🔐 Результат:\n" + "\n".join(status_lines))
+        return
+
+    # 0n) Admin: генерация подписи для Instagram Reels
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip().startswith("*reels"):
+        # *reels — случайная тема, *reels тема — конкретная
+        await safe_send_markdown(message, "⏳ Генерирую подпись для Reels...")
+        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+        month = now.month
+
+        custom_topic = text.strip()[len("*reels"):].strip()
+        if not custom_topic:
+            # Берём тему дня
+            from zajabri_content import ZAJABRI_TOPICS
+            topics = ZAJABRI_TOPICS.get(month, [])
+            if topics:
+                import random as _rnd
+                custom_topic = _rnd.choice(topics)
+            else:
+                custom_topic = "Спиннинг в Московской области"
+
+        caption = await generate_reels_caption(client, custom_topic, month)
+        header = f"🎬 Подпись для Reels\nТема: {custom_topic}\n\n━━━━━━━━━━━━━━━━━━━━\n"
+        await message.answer(header + caption)
         return
 
     # 0e) Admin: генерация PR-текстов для размещения в чатах
