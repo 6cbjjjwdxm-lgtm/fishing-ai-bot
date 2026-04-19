@@ -563,7 +563,7 @@ async def handle_text(message: Message):
     if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*pulsdays_post":
         bot_inst = message.bot
         await safe_send_markdown(message, "⏳ Публикую пост в @pulsdays...")
-        ok = await publish_pulsdays_post(bot_inst, client)
+        ok = await publish_pulsdays_post(bot_inst, client, force=True)
         if ok:
             await safe_send_markdown(message, f"✅ Пост опубликован в {PULSDAYS_CHANNEL}")
         else:

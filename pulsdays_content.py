@@ -207,16 +207,16 @@ async def generate_pulsdays_post(client: AsyncOpenAI, target_date: datetime.date
 
 # ────────────────────────────── Публикация ──────────────────────────────
 
-async def publish_pulsdays_post(bot, client: AsyncOpenAI) -> bool:
+async def publish_pulsdays_post(bot, client: AsyncOpenAI, force: bool = False) -> bool:
     """
     Ежедневная публикация в @pulsdays:
-    1. Проверяет дубли
+    1. Проверяет дубли (можно обойти через force=True)
     2. Генерирует текст поста (HTML)
     3. Ищет реалистичное фото через Pexels
     4. Публикует фото + текст в канал
     """
-    # Защита от дублей
-    if was_published_today(PULSDAYS_CHANNEL, "daily"):
+    # Защита от дублей (пропускается при force)
+    if not force and was_published_today(PULSDAYS_CHANNEL, "daily"):
         logger.info("Pulsdays daily post already published today, skipping")
         return True
 
