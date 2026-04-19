@@ -55,6 +55,12 @@ from zajabri_content import (
     SOCIAL_POST_HOUR_UTC,
     SOCIAL_POST_MINUTE_UTC,
 )
+from pulsdays_content import (
+    publish_pulsdays_post,
+    PULSDAYS_CHANNEL,
+    PULSDAYS_POST_HOUR_UTC,
+    PULSDAYS_POST_MINUTE_UTC,
+)
 from token_manager import check_and_refresh_tokens, get_token_status
 from persistence import get_stats
 
@@ -150,6 +156,9 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="━━━ Соцсети ━━━", callback_data="cmd:noop")],
         [InlineKeyboardButton(text="📱 Threads + IG посты", callback_data="cmd:social_now"),
          InlineKeyboardButton(text="🎬 Reels подпись", callback_data="cmd:reels")],
+        # @pulsdays
+        [InlineKeyboardButton(text="━━━ @pulsdays ━━━", callback_data="cmd:noop")],
+        [InlineKeyboardButton(text="☀️ Пост @pulsdays", callback_data="cmd:pulsdays_post")],
         # Система
         [InlineKeyboardButton(text="━━━ Система ━━━", callback_data="cmd:noop")],
         [InlineKeyboardButton(text="🔐 Статус токенов", callback_data="cmd:token_status"),
@@ -170,6 +179,7 @@ CMD_MAP = {
     "zajabri_pr": "*zajabri_pr",
     "social_now": "*social_now",
     "reels": "*reels",
+    "pulsdays_post": "*pulsdays_post",
     "token_status": "*token_status",
     "token_refresh": "*token_refresh",
     "stats": "*stats",
@@ -549,6 +559,17 @@ async def handle_text(message: Message):
         await message.answer("🔐 Результат:\n" + "\n".join(status_lines))
         return
 
+    # 0-pulsdays) Admin: принудительная публикация @pulsdays
+    if ADMIN_IDS and uid in ADMIN_IDS and text.strip() == "*pulsdays_post":
+        bot_inst = message.bot
+        await safe_send_markdown(message, "⏳ Публикую пост в @pulsdays...")
+        ok = await publish_pulsdays_post(bot_inst, client)
+        if ok:
+            await safe_send_markdown(message, f"✅ Пост опубликован в {PULSDAYS_CHANNEL}")
+        else:
+            await safe_send_markdown(message, "❌ Не удалось опубликовать.")
+        return
+
     # 0n) Admin: генерация подписи для Instagram Reels
     if ADMIN_IDS and uid in ADMIN_IDS and text.strip().startswith("*reels"):
         # *reels — случайная тема, *reels тема — конкретная
@@ -798,6 +819,18 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         misfire_grace_time=3600,
     )
 
+    # ── @PULSDAYS ──
+
+    scheduler.add_job(
+        publish_pulsdays_post,
+        trigger=CronTrigger(hour=PULSDAYS_POST_HOUR_UTC, minute=PULSDAYS_POST_MINUTE_UTC, timezone="UTC"),
+        args=[bot, client],
+        id="pulsdays_daily",
+        name="Daily post to @pulsdays",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
     # ── META TOKEN AUTO-REFRESH (ежедневно в 03:00 UTC = 06:00 МСК) ──
 
     scheduler.add_job(
@@ -814,10 +847,12 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         "Scheduler configured:\n"
         "  @dnevnikrib: daily %02d:%02d UTC, viral Sun %02d:%02d UTC\n"
         "  @zajabri: daily %02d:%02d UTC, viral Sun %02d:%02d UTC\n"
-        "  Social bundle: daily %02d:%02d UTC",
+        "  Social bundle: daily %02d:%02d UTC\n"
+        "  @pulsdays: daily %02d:%02d UTC",
         POST_HOUR_UTC, POST_MINUTE_UTC, viral_hour, POST_MINUTE_UTC,
         ZAJABRI_POST_HOUR_UTC, ZAJABRI_POST_MINUTE_UTC, zajabri_viral_hour, ZAJABRI_POST_MINUTE_UTC,
         SOCIAL_POST_HOUR_UTC, SOCIAL_POST_MINUTE_UTC,
+        PULSDAYS_POST_HOUR_UTC, PULSDAYS_POST_MINUTE_UTC,
     )
     return scheduler
 

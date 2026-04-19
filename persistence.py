@@ -265,7 +265,7 @@ def get_stats() -> str:
 
     lines = ["📊 Статистика контент-завода:\n"]
 
-    for channel in ["@dnevnikrib", "@zajabri"]:
+    for channel in ["@dnevnikrib", "@zajabri", "@pulsdays"]:
         history = state.get("published", {}).get(channel, [])
         total = len(history)
         today_count = sum(1 for e in history if e.get("date") == today)
