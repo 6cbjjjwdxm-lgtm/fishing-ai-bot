@@ -10,13 +10,13 @@ pulsdays_content.py
 
 import asyncio
 import datetime
-import io
 import logging
 import os
 import re
 from typing import Optional, Tuple
 
 import aiohttp
+from aiogram.types import BufferedInputFile
 from openai import AsyncOpenAI
 
 from persistence import (
@@ -231,8 +231,7 @@ async def publish_pulsdays_post(bot, client: AsyncOpenAI) -> bool:
     try:
         if image_bytes:
             # Пост с картинкой
-            photo_input = io.BytesIO(image_bytes)
-            photo_input.name = "cat_of_the_day.png"
+            photo_input = BufferedInputFile(image_bytes, filename="cat_of_the_day.png")
 
             if len(clean_text) <= TG_CAPTION_LIMIT:
                 # Текст влезает в caption
