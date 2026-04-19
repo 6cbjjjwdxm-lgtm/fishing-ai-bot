@@ -402,17 +402,66 @@ NAMEDAYS = {
 # Новолуние — опорная точка: 2024-01-11 11:57 UTC
 _NEW_MOON_EPOCH = datetime.datetime(2024, 1, 11, 11, 57, tzinfo=datetime.timezone.utc)
 _SYNODIC_MONTH = 29.530588853  # средний синодический месяц в днях
-_SIDEREAL_MONTH = 27.321661    # сидерический месяц (оборот Луны по зодиаку)
 
-# Знаки зодиака по порядку (каждый ≈ 2.33 дня в лунном цикле)
+# Знаки зодиака по порядку (каждый = 30° эклиптической долготы)
 ZODIAC_SIGNS = [
     "Овен", "Телец", "Близнецы", "Рак",
     "Лев", "Дева", "Весы", "Скорпион",
     "Стрелец", "Козерог", "Водолей", "Рыбы",
 ]
 
-# Опорная точка для знака: 2024-01-11 Луна была в Козероге (индекс 9)
-_MOON_SIGN_EPOCH_INDEX = 9
+
+def _moon_longitude(dt: datetime.datetime) -> float:
+    """Эклиптическая долгота Луны по алгоритму Жана Меуса.
+
+    Точность ~1°, достаточно для определения знака зодиака (30° каждый).
+    Источник: Jean Meeus, "Astronomical Algorithms", Chapter 47.
+    """
+    # Юлианская дата
+    y = dt.year
+    mo = dt.month
+    d = dt.day + (dt.hour + dt.minute / 60.0 + dt.second / 3600.0) / 24.0
+    if mo <= 2:
+        y -= 1
+        mo += 12
+    A = y // 100
+    B = 2 - A + A // 4
+    jd = int(365.25 * (y + 4716)) + int(30.6001 * (mo + 1)) + d + B - 1524.5
+
+    # Юлианские столетия от J2000.0
+    T = (jd - 2451545.0) / 36525.0
+
+    # Средняя долгота Луны (L')
+    Lp = (218.3164477 + 481267.88123421 * T
+          - 0.0015786 * T**2 + T**3 / 538841.0 - T**4 / 65194000.0)
+    # Средняя аномалия Луны (M')
+    Mp = (134.9633964 + 477198.8675055 * T
+          + 0.0087414 * T**2 + T**3 / 69699.0 - T**4 / 14712000.0)
+    # Средняя аномалия Солнца (M)
+    M = (357.5291092 + 35999.0502909 * T
+         - 0.0001536 * T**2 + T**3 / 24490000.0)
+    # Среднее удлинение Луны (D)
+    D = (297.8501921 + 445267.1114034 * T
+         - 0.0018819 * T**2 + T**3 / 545868.0 - T**4 / 113065000.0)
+    # Аргумент широты Луны (F)
+    F = (93.2720950 + 483202.0175233 * T
+         - 0.0036539 * T**2 - T**3 / 3526000.0 + T**4 / 863310000.0)
+
+    # Перевод в радианы
+    Mp_r = math.radians(Mp % 360)
+    M_r = math.radians(M % 360)
+    D_r = math.radians(D % 360)
+    F_r = math.radians(F % 360)
+
+    # Главные возмущения долготы
+    lon = Lp
+    lon += 6.289 * math.sin(Mp_r)             # уравнение центра
+    lon += 1.274 * math.sin(2 * D_r - Mp_r)   # эвекция
+    lon += 0.658 * math.sin(2 * D_r)           # вариация
+    lon -= 0.186 * math.sin(M_r)               # годичное уравнение
+    lon -= 0.114 * math.sin(2 * F_r)           # приведение к эклиптике
+
+    return lon % 360
 
 
 def get_moon_age(dt: datetime.datetime) -> float:
@@ -442,13 +491,9 @@ def get_moon_phase(moon_age: float) -> str:
 
 
 def get_moon_sign(dt: datetime.datetime) -> str:
-    """Определяет знак зодиака Луны на указанную дату."""
-    diff_days = (dt - _NEW_MOON_EPOCH).total_seconds() / 86400.0
-    # Сколько сидерических месяцев прошло
-    sidereal_cycles = diff_days / _SIDEREAL_MONTH
-    # Позиция в зодиаке (0-12 знаков)
-    sign_position = (sidereal_cycles * 12 + _MOON_SIGN_EPOCH_INDEX) % 12
-    return ZODIAC_SIGNS[int(sign_position)]
+    """Определяет знак зодиака Луны по эклиптической долготе (Meeus)."""
+    lon = _moon_longitude(dt)
+    return ZODIAC_SIGNS[int(lon / 30)]
 
 
 def get_moon_illumination(moon_age: float) -> int:
